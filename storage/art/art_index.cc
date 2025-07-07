@@ -943,5 +943,172 @@ long long Art_index::update_key(art_tree *t, uchar *key, int key_len, long long 
 int Art_index::destroy_index(art_tree *t) {
   DBUG_ENTER("Art_index::destroy_index");
   destroy_node(t->root);
+  t->root = NULL;
+  t->size = 0;
   DBUG_RETURN(0);
+}
+
+/**
+ * 收集ART树中的所有叶子节点（递归遍历）
+ */
+void Art_index::collect_leaves(art_node *n, art_leaf **leaves, int *count, int max_count) {
+    if (!n || *count >= max_count) return;
+    
+    // 如果是叶子节点
+    if (IS_LEAF(n)) {
+        leaves[*count] = LEAF_RAW(n);
+        (*count)++;
+        return;
+    }
+    
+    // 递归遍历所有子节点
+    int i;
+    union {
+        art_node4 *p1;
+        art_node16 *p2;
+        art_node48 *p3;
+        art_node256 *p4;
+    } p;
+    
+    switch (n->type) {
+        case NODE4:
+            p.p1 = (art_node4*)n;
+            for (i = 0; i < n->num_children; i++) {
+                collect_leaves(p.p1->children[i], leaves, count, max_count);
+            }
+            break;
+            
+        case NODE16:
+            p.p2 = (art_node16*)n;
+            for (i = 0; i < n->num_children; i++) {
+                collect_leaves(p.p2->children[i], leaves, count, max_count);
+            }
+            break;
+            
+        case NODE48:
+            p.p3 = (art_node48*)n;
+            for (i = 0; i < 256; i++) {
+                int idx = p.p3->keys[i];
+                if (!idx) continue;
+                collect_leaves(p.p3->children[idx-1], leaves, count, max_count);
+            }
+            break;
+            
+        case NODE256:
+            p.p4 = (art_node256*)n;
+            for (i = 0; i < 256; i++) {
+                if (p.p4->children[i])
+                    collect_leaves(p.p4->children[i], leaves, count, max_count);
+            }
+            break;
+    }
+}
+
+/**
+ * 保存索引到文件
+ */
+int Art_index::save_index(art_tree *t) {
+    DBUG_ENTER("Art_index::save_index");
+    
+    if (index_file == -1 || !t) {
+        DBUG_RETURN(-1);
+    }
+    
+    // 收集所有叶子节点
+    int max_leaves = t->size + 1000; // 预留空间
+    art_leaf **leaves = (art_leaf**)malloc(max_leaves * sizeof(art_leaf*));
+    int leaf_count = 0;
+    
+    collect_leaves(t->root, leaves, &leaf_count, max_leaves);
+    
+    // 移动到文件开头
+    my_seek(index_file, 0, MY_SEEK_SET, MYF(0));
+    
+    // 写入索引项数量
+    my_write(index_file, (uchar*)&leaf_count, sizeof(int), MYF(0));
+    
+    // 写入每个索引项
+    for (int i = 0; i < leaf_count; i++) {
+        art_leaf *leaf = leaves[i];
+        // 写入 key_len
+        my_write(index_file, (uchar*)&leaf->key_len, sizeof(int), MYF(0));
+        // 写入 key
+        my_write(index_file, leaf->key, leaf->key_len, MYF(0));
+        // 写入 pos
+        my_write(index_file, (uchar*)&leaf->pos, sizeof(long long), MYF(0));
+    }
+    
+    free(leaves);
+    DBUG_RETURN(0);
+}
+
+/**
+ * 从文件加载索引
+ */
+int Art_index::load_index(art_tree *t) {
+    DBUG_ENTER("Art_index::load_index");
+    
+    if (index_file == -1 || !t) {
+        DBUG_RETURN(-1);
+    }
+    
+    // 清空现有索引
+    if (t->root) {
+        destroy_node(t->root);
+        t->root = NULL;
+        t->size = 0;
+    }
+    
+    // 移动到文件开头
+    my_seek(index_file, 0, MY_SEEK_SET, MYF(0));
+    
+    // 读取索引项数量
+    int leaf_count = 0;
+    if (my_read(index_file, (uchar*)&leaf_count, sizeof(int), MYF(0)) != sizeof(int)) {
+        // 文件为空或读取失败，不是错误
+        DBUG_RETURN(0);
+    }
+    
+    // 读取并重建每个索引项
+    for (int i = 0; i < leaf_count; i++) {
+        int key_len;
+        uchar key[256]; // 假设key最大256字节
+        long long pos;
+        
+        // 读取 key_len
+        if (my_read(index_file, (uchar*)&key_len, sizeof(int), MYF(0)) != sizeof(int)) {
+            break;
+        }
+        
+        // 读取 key
+        if (key_len > 0 && key_len < 256) {
+            if (my_read(index_file, key, key_len, MYF(0)) != (size_t)key_len) {
+                break;
+            }
+        }
+        
+        // 读取 pos
+        if (my_read(index_file, (uchar*)&pos, sizeof(long long), MYF(0)) != sizeof(long long)) {
+            break;
+        }
+        
+        // 重新插入索引
+        insert_key(t, key, pos, key_len);
+    }
+    
+    DBUG_RETURN(0);
+}
+
+/**
+ * 关闭索引文件
+ */
+int Art_index::close_index() {
+    DBUG_ENTER("Art_index::close_index");
+    
+    if (index_file != -1) {
+        my_close(index_file, MYF(0));
+        index_file = -1;
+    }
+    
+    DBUG_RETURN(0);
 }

@@ -72,6 +72,8 @@
   ha_example::rnd_next
   ha_example::rnd_next
   ha_example::rnd_next
+  ha_example::rnd_next
+  ha_example::rnd_next
   ha_example::extra
   ha_example::external_lock
   ha_example::extra
@@ -151,6 +153,12 @@ Art_share::Art_share()
    //TODO index class implementation
 }
 
+static const char *ha_art_exts[] = {
+  SDE_EXT,
+  SDI_EXT,
+  NullS
+};
+
 static int art_init_func(void *p) {
   DBUG_TRACE;
   DBUG_ENTER("art_init_func");
@@ -162,6 +170,7 @@ static int art_init_func(void *p) {
   art_hton->state = SHOW_OPTION_YES;
   art_hton->create = art_create_handler;
   art_hton->flags = HTON_CAN_RECREATE;
+  art_hton->file_extensions = ha_art_exts;
   art_hton->is_supported_system_table = art_is_supported_system_table;
 
   DBUG_RETURN(0);
@@ -200,13 +209,6 @@ static handler *art_create_handler(handlerton *hton, TABLE_SHARE *table,
 
 ha_art::ha_art(handlerton *hton, TABLE_SHARE *table_arg)
     : handler(hton, table_arg) {}
-
-
-static const char *ha_art_exts[] = {
-  SDE_EXT,
-  SDI_EXT,
-  NullS
-};
 
 const char **ha_art::bas_ext() const 
 {
@@ -292,7 +294,10 @@ int ha_art::open(const char *name, int mode, uint test_if_lock, const dd::Table 
   // fn_format(name_buff, name, "", SDI_EXT, MY_REPLACE_EXT | MY_UNPACK_FILENAME);
   fn_format(name_buff, name, "", SDI_EXT, MY_UNPACK_FILENAME | MY_APPEND_EXT);
   share->index_class->open_index(name_buff);
-  // share->index_class->load_index();
+  
+  // 从文件加载索引
+  share->index_class->load_index(share->index_tree1);
+  
   // 用current_positio初始化位置
   current_position = 0;
   thr_lock_data_init(&share->lock, &lock, nullptr);
@@ -319,11 +324,9 @@ int ha_art::close(void) {
   DBUG_TRACE;
   DBUG_ENTER("ha_art::close");
   share->data_class->close_table();
-  // share->index_class->save_index();
-
-  // share->index_class->destroy_index(index_tree);
-
-  // share->index_class->close_index();
+  share->index_class->save_index(share->index_tree1);
+  share->index_class->destroy_index(share->index_tree1);
+  share->index_class->close_index();
   //TODO index
   DBUG_RETURN(0);
 }
@@ -1334,3 +1337,5 @@ mysql_declare_plugin(art){
     nullptr,                  /* config options */
     0,                        /* flags */
 } mysql_declare_plugin_end;
+
+

@@ -183,12 +183,20 @@ public:
   long long update_key(art_tree *t, uchar *key, int key_len, long long pos);
   // Destroys an ART tree
   int destroy_index(art_tree *t);
+  // Save index to file 
+  int save_index(art_tree *t);
+  // Load index from file
+  int load_index(art_tree *t);
+  // Close index file
+  int close_index();
 
   //art_tree *index_tree;
 private:
   File index_file;
   int max_key_len;
   int block_size;
+  // 辅助方法：收集ART树中的所有叶子节点
+  void collect_leaves(art_node *n, art_leaf **leaves, int *count, int max_count);
 };
 
 
