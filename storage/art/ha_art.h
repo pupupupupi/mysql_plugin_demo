@@ -309,4 +309,10 @@ class ha_art : public handler {
   THR_LOCK_DATA **store_lock(
       THD *thd, THR_LOCK_DATA **to,
       enum thr_lock_type lock_type) override;  ///< required
+
+private:
+  // Range scan state
+  bool range_scan_started;
+  uchar *last_read_key;
+  uint last_read_key_len;
 };

@@ -211,7 +211,12 @@ static handler *art_create_handler(handlerton *hton, TABLE_SHARE *table,
 }
 
 ha_art::ha_art(handlerton *hton, TABLE_SHARE *table_arg)
-    : handler(hton, table_arg) {}
+    : handler(hton, table_arg) {
+  // Initialize range scan state
+  range_scan_started = false;
+  last_read_key = nullptr;
+  last_read_key_len = 0;
+}
 
 const char **ha_art::bas_ext() const 
 {
@@ -326,6 +331,14 @@ int ha_art::open(const char *name, int mode, uint test_if_lock, const dd::Table 
 int ha_art::close(void) {
   DBUG_TRACE;
   DBUG_ENTER("ha_art::close");
+  
+  // Clean up range scan state
+  if (last_read_key) {
+    my_free(last_read_key);
+    last_read_key = nullptr;
+  }
+  range_scan_started = false;
+  last_read_key_len = 0;
   
   share->data_class->close_table();
   
@@ -658,6 +671,13 @@ int ha_art::index_read(uchar *buf, const uchar *key, uint key_len, enum ha_rkey_
 
   DBUG_ENTER("ha_art::index_read");
 
+  // Reset range scan state
+  range_scan_started = false;
+  if (last_read_key) {
+    my_free(last_read_key);
+    last_read_key = nullptr;
+  }
+
   if (key == NULL) {
     pos = share->index_class->get_first_pos(share->index_tree1);
   } else {
@@ -668,18 +688,16 @@ int ha_art::index_read(uchar *buf, const uchar *key, uint key_len, enum ha_rkey_
     DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
   }
   
-  // Initialize iterator for potential range scans
-  if (share->index_class->init_iterator(share->index_tree1) == 0) {
-    if (key != NULL) {
-      // Set iterator to the position of the found key
-      share->index_class->seek_iterator(key, key_len);
-      // Advance past the current record so index_next() returns the next record
-      share->index_class->get_next_leaf();
-    } else {
-      share->index_class->reset_to_first();
-      // Advance past the first record
-      share->index_class->get_next_leaf();
+  // Store the key for potential range scan later
+  if (key != NULL) {
+    last_read_key = (uchar*)my_malloc(PSI_NOT_INSTRUMENTED, key_len, MYF(0));
+    if (last_read_key) {
+      memcpy(last_read_key, key, key_len);
+      last_read_key_len = key_len;
     }
+  } else {
+    last_read_key = nullptr;
+    last_read_key_len = 0;
   }
   
   current_position = pos + share->data_class->row_size(table->s->rec_buff_length);
@@ -694,6 +712,32 @@ int ha_art::index_read(uchar *buf, const uchar *key, uint key_len, enum ha_rkey_
 int ha_art::index_next(uchar *buf) {
   DBUG_TRACE;
   DBUG_ENTER("ha_art::index_next");
+  
+  // Initialize iterator only when we actually need range scanning
+  if (!range_scan_started) {
+    if (share->index_class->init_iterator(share->index_tree1) != 0) {
+      DBUG_RETURN(HA_ERR_END_OF_FILE);
+    }
+    
+    // Position iterator based on the last read key
+    if (last_read_key) {
+      share->index_class->seek_iterator(last_read_key, last_read_key_len);
+      // Skip the current record since we already returned it in index_read
+      art_leaf *current_leaf = share->index_class->get_next_leaf();
+      if (!current_leaf) {
+        DBUG_RETURN(HA_ERR_END_OF_FILE);
+      }
+    } else {
+      share->index_class->reset_to_first();
+      // Skip the first record since we already returned it in index_read  
+      art_leaf *current_leaf = share->index_class->get_next_leaf();
+      if (!current_leaf) {
+        DBUG_RETURN(HA_ERR_END_OF_FILE);
+      }
+    }
+    
+    range_scan_started = true;
+  }
   
   // Get the next leaf from iterator
   art_leaf *leaf = share->index_class->get_next_leaf();
@@ -716,6 +760,27 @@ int ha_art::index_next(uchar *buf) {
 int ha_art::index_prev(uchar *buf) {
   DBUG_TRACE;
   DBUG_ENTER("ha_art::index_prev");
+  
+  // Initialize iterator only when we actually need range scanning
+  if (!range_scan_started) {
+    if (share->index_class->init_iterator(share->index_tree1) != 0) {
+      DBUG_RETURN(HA_ERR_END_OF_FILE);
+    }
+    
+    // Position iterator based on the last read key
+    if (last_read_key) {
+      share->index_class->seek_iterator(last_read_key, last_read_key_len);
+      // We need to position at the current record for reverse iteration
+      art_leaf *current_leaf = share->index_class->get_next_leaf();
+      if (!current_leaf) {
+        DBUG_RETURN(HA_ERR_END_OF_FILE);
+      }
+    } else {
+      share->index_class->reset_to_last();
+    }
+    
+    range_scan_started = true;
+  }
   
   // Get the previous leaf from iterator
   art_leaf *leaf = share->index_class->get_prev_leaf();
@@ -741,26 +806,32 @@ int ha_art::index_prev(uchar *buf) {
   @see
   opt_range.cc, opt_sum.cc, sql_handler.cc and sql_select.cc
 */
-
 int ha_art::index_first(uchar *buf) {
   DBUG_ENTER("ha_art::index_first");
   
-  // Initialize iterator for range scan
-  if (share->index_class->init_iterator(share->index_tree1) != 0) {
+  // Reset range scan state
+  range_scan_started = false;
+  if (last_read_key) {
+    my_free(last_read_key);
+    last_read_key = nullptr;
+  }
+  last_read_key_len = 0;
+  
+  // Get the first position directly
+  long long pos = share->index_class->get_first_pos(share->index_tree1);
+  if (pos == -1) {
     DBUG_RETURN(HA_ERR_END_OF_FILE);
   }
   
-  // Reset iterator to first position
-  share->index_class->reset_to_first();
-  
-  // Get the first leaf
-  art_leaf *leaf = share->index_class->get_next_leaf();
-  if (!leaf) {
-    DBUG_RETURN(HA_ERR_END_OF_FILE);
+  // Initialize iterator for potential subsequent calls to index_next
+  if (share->index_class->init_iterator(share->index_tree1) == 0) {
+    share->index_class->reset_to_first();
+    // Skip the first record since we're returning it now
+    share->index_class->get_next_leaf();
+    range_scan_started = true;
   }
   
   // Read the complete row data
-  long long pos = leaf->pos;
   current_position = pos + share->data_class->row_size(table->s->rec_buff_length);
   share->data_class->read_row(buf, table->s->rec_buff_length, pos);
   
@@ -777,26 +848,32 @@ int ha_art::index_first(uchar *buf) {
   @see
   opt_range.cc, opt_sum.cc, sql_handler.cc and sql_select.cc
 */
-
 int ha_art::index_last(uchar *buf) {
   DBUG_ENTER("ha_art::index_last");
   
-  // Initialize iterator for range scan if not already done
-  if (share->index_class->init_iterator(share->index_tree1) != 0) {
+  // Reset range scan state
+  range_scan_started = false;
+  if (last_read_key) {
+    my_free(last_read_key);
+    last_read_key = nullptr;
+  }
+  last_read_key_len = 0;
+  
+  // Get the last position directly
+  long long pos = share->index_class->get_last_pos(share->index_tree1);
+  if (pos == -1) {
     DBUG_RETURN(HA_ERR_END_OF_FILE);
   }
   
-  // Reset iterator to last position
-  share->index_class->reset_to_last();
-  
-  // Get the last leaf
-  art_leaf *leaf = share->index_class->get_prev_leaf();
-  if (!leaf) {
-    DBUG_RETURN(HA_ERR_END_OF_FILE);
+  // Initialize iterator for potential subsequent calls to index_prev
+  if (share->index_class->init_iterator(share->index_tree1) == 0) {
+    share->index_class->reset_to_last();
+    // Skip the last record since we're returning it now
+    share->index_class->get_prev_leaf();
+    range_scan_started = true;
   }
   
   // Read the complete row data
-  long long pos = leaf->pos;
   current_position = pos + share->data_class->row_size(table->s->rec_buff_length);
   share->data_class->read_row(buf, table->s->rec_buff_length, pos);
   

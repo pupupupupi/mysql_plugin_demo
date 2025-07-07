@@ -1004,10 +1004,15 @@ void Art_index::collect_leaves(art_node *n, art_leaf **leaves, int *count, int m
     // If this is a leaf node, add it to the array
     if (IS_LEAF(n)) {
         art_leaf *leaf = LEAF_RAW(n);
-        if (leaf) {
+        if (leaf && leaf->key_len > 0 && leaf->key_len <= max_key_len) {
             leaves[*count] = leaf;
             (*count)++;
         }
+        return;
+    }
+    
+    // Verify this is a valid internal node
+    if (n->type < NODE4 || n->type > NODE256) {
         return;
     }
     
@@ -1015,23 +1020,32 @@ void Art_index::collect_leaves(art_node *n, art_leaf **leaves, int *count, int m
     switch (n->type) {
         case NODE4: {
             art_node4 *node = (art_node4*)n;
-            for (int i = 0; i < node->n.num_children; i++) {
-                collect_leaves(node->children[i], leaves, count, max_count);
+            if (node->n.num_children > 4) return; // Safety check
+            for (int i = 0; i < node->n.num_children && i < 4; i++) {
+                if (node->children[i]) {
+                    collect_leaves(node->children[i], leaves, count, max_count);
+                }
             }
             break;
         }
         case NODE16: {
             art_node16 *node = (art_node16*)n;
-            for (int i = 0; i < node->n.num_children; i++) {
-                collect_leaves(node->children[i], leaves, count, max_count);
+            if (node->n.num_children > 16) return; // Safety check
+            for (int i = 0; i < node->n.num_children && i < 16; i++) {
+                if (node->children[i]) {
+                    collect_leaves(node->children[i], leaves, count, max_count);
+                }
             }
             break;
         }
         case NODE48: {
             art_node48 *node = (art_node48*)n;
             for (int i = 0; i < 256; i++) {
-                if (node->keys[i] != 0) {
-                    collect_leaves(node->children[node->keys[i] - 1], leaves, count, max_count);
+                if (node->keys[i] != 0 && node->keys[i] <= 48) {
+                    art_node *child = node->children[node->keys[i] - 1];
+                    if (child) {
+                        collect_leaves(child, leaves, count, max_count);
+                    }
                 }
             }
             break;
