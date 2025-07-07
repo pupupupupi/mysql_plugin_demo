@@ -262,6 +262,17 @@ class ha_art : public handler {
   int index_prev(uchar *buf) override;
 
   /** @brief
+    Range query support - read first record in range
+  */
+  int read_range_first(const key_range *start_key, const key_range *end_key,
+                       bool eq_range_arg, bool sorted) override;
+
+  /** @brief
+    Range query support - read next record in range
+  */
+  int read_range_next() override;
+
+  /** @brief
     We implement this in ha_example.cc. It's not an obligatory method;
     skip it and and MySQL will treat it as not implemented.
   */
@@ -305,6 +316,7 @@ class ha_art : public handler {
   uchar *create_key_buffer(unsigned int length);
   int get_key_len();
   // int get_key_len2();
+  uchar* convert_search_key(const uchar *mysql_key, uint key_len, uint *converted_len);
 
   THR_LOCK_DATA **store_lock(
       THD *thd, THR_LOCK_DATA **to,

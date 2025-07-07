@@ -190,38 +190,38 @@ public:
   // Close index file
   int close_index();
 
-  // Range scan support - Iterator methods
-  // Initialize iterator for range scan
+  // Range scan support - Redesigned simple iterator
   int init_iterator(const art_tree *t);
-  // Get the next key in iteration order
   art_leaf* get_next_leaf();
-  // Get the previous key in iteration order
   art_leaf* get_prev_leaf();
-  // Reset iterator to first position
   int reset_to_first();
-  // Reset iterator to last position
   int reset_to_last();
-  // Set iterator to specific key position
   int seek_iterator(const uchar *key, int key_len);
+  void cleanup_iterator();
 
   //art_tree *index_tree;
 private:
   File index_file;
   int max_key_len;
   int block_size;
-  // 辅助方法：收集ART树中的所有叶子节点
-  void collect_leaves(art_node *n, art_leaf **leaves, int *count, int max_count);
   
-  // Iterator state for range scans
-  art_leaf **sorted_leaves;  // Array of sorted leaf pointers
-  int total_leaves;          // Total number of leaves
-  int current_leaf_index;    // Current position in iteration
-  bool iterator_initialized; // Whether iterator is ready
+  // Simplified iterator using linear leaf collection
+  struct simple_iterator {
+    art_leaf **leaves;          // Array of all leaves (sorted)
+    int total_leaves;           // Total number of leaves
+    int current_index;          // Current position in array
+    int capacity;               // Array capacity
+    bool valid;                 // Iterator validity
+  };
   
-  // Helper methods for iterator
-  int build_sorted_leaf_array(const art_tree *t);
-  void cleanup_iterator();
-  static int compare_leaves(const void *a, const void *b);
+  // Iterator state
+  const art_tree *iter_tree;           // Tree being iterated
+  simple_iterator iterator;            // Simple linear iterator
+  
+  // Helper methods for leaf collection
+  void collect_all_leaves(art_node *node, art_leaf ***leaves_ptr, int *count, int *capacity);
+  void resize_leaf_array(art_leaf ***leaves_ptr, int *capacity);
+  static int compare_leaf_keys(const void *a, const void *b);
 };
 
 

@@ -102,11 +102,13 @@
 
 #include "storage/art/ha_art.h"
 
-#include "my_dbug.h"
-#include "mysql/plugin.h"
-#include "sql/sql_class.h"
-#include "sql/sql_plugin.h"
-#include "sql/field.h"
+#include <fcntl.h>
+#include <mysql/plugin.h>
+#include <sql/sql_class.h>
+#include <sql/sql_plugin.h>
+#include <sql/field.h>
+#include <sql/table.h>
+// Debug logging removed for production
 #include "typelib.h"                        
 #include "my_sys.h"
 #include "sql/handler.h"
@@ -285,14 +287,16 @@ static bool art_is_supported_system_table(const char *db,
   handler::ha_open() in handler.cc
 */
 
-int ha_art::open(const char *name, int mode, uint test_if_lock, const dd::Table *) {
+int ha_art::open(const char *name, int mode, uint test_if_locked,
+                 const dd::Table *table_def) {
   DBUG_TRACE;
   DBUG_ENTER("ha_art::open");
 
   char name_buff[FN_REFLEN];
 
-  if (!(share = get_share())) 
+  if (!(share = get_share())) {
     DBUG_RETURN(1);
+  }
   
   // fn_format(name_buff, name, "", SDE_EXT, MY_REPLACE_EXT | MY_UNPACK_FILENAME);
   fn_format(name_buff, name, "", SDE_EXT, MY_UNPACK_FILENAME | MY_APPEND_EXT);
@@ -309,6 +313,11 @@ int ha_art::open(const char *name, int mode, uint test_if_lock, const dd::Table 
   // 用current_position初始化位置
   current_position = 0;
   thr_lock_data_init(&share->lock, &lock, nullptr);
+
+  // Initialize iterator if index tree exists
+  if (share->index_tree1 && share->index_class) {
+    share->index_class->init_iterator(share->index_tree1);
+  }
 
   DBUG_RETURN(0);
 }
@@ -376,9 +385,31 @@ uchar *ha_art::get_key() {
         case MYSQL_TYPE_SHORT:      // SMALLINT
         case MYSQL_TYPE_TINY:       // TINYINT
         {
-          // For integer fields, copy the raw bytes directly
+          // For integer fields, convert to memcomparable format
+          // MySQL requires big-endian with sign bit flipped for proper sorting
           uint field_length = (*field)->pack_length();
-          memcpy(key_buffer, field_ptr, field_length);
+          
+          if (field_type == MYSQL_TYPE_LONG && field_length == 4) {
+            // Handle 4-byte signed INT
+            int32_t int_val = *((int32_t*)field_ptr);
+            
+            // Convert to memcomparable format:
+            // 1. Treat as unsigned to avoid sign extension
+            // 2. Flip sign bit (0x80000000) - this makes negatives sort before positives
+            // 3. Convert to big-endian
+            uint32_t unsigned_val = (uint32_t)int_val;
+            unsigned_val ^= 0x80000000; // Flip the sign bit
+            
+            // Store in big-endian order for memcmp compatibility
+            key_buffer[0] = (unsigned_val >> 24) & 0xFF;
+            key_buffer[1] = (unsigned_val >> 16) & 0xFF; 
+            key_buffer[2] = (unsigned_val >> 8) & 0xFF;
+            key_buffer[3] = unsigned_val & 0xFF;
+          } else {
+            // For other integer types, use direct copy for now
+            // TODO: Add proper handling for other integer sizes
+            memcpy(key_buffer, field_ptr, field_length);
+          }
           break;
         }
         
@@ -418,6 +449,47 @@ uchar *ha_art::get_key() {
     }
   }
   DBUG_RETURN(nullptr);
+}
+
+/**
+  @brief
+  Convert MySQL key to memcomparable format for searching
+  This should match the format used in get_key() for storage
+*/
+uchar* ha_art::convert_search_key(const uchar *mysql_key, uint key_len, uint *converted_len) {
+  static uchar converted_buffer[256];
+  
+  // Get the primary key field info
+  for (Field **field = table->field; *field; field++) {
+    if ((*field)->key_start.to_ulonglong() == 1) {
+      enum_field_types field_type = (*field)->type();
+      
+      if (field_type == MYSQL_TYPE_LONG && key_len == 4) {
+        // Convert INT key to memcomparable format (same as get_key())
+        int32_t int_val = *((int32_t*)mysql_key);
+        uint32_t unsigned_val = (uint32_t)int_val;
+        unsigned_val ^= 0x80000000; // Flip the sign bit
+        
+        // Store in big-endian order
+        converted_buffer[0] = (unsigned_val >> 24) & 0xFF;
+        converted_buffer[1] = (unsigned_val >> 16) & 0xFF; 
+        converted_buffer[2] = (unsigned_val >> 8) & 0xFF;
+        converted_buffer[3] = unsigned_val & 0xFF;
+        
+        *converted_len = 4;
+        return converted_buffer;
+      }
+      // For other field types, return original key
+      memcpy(converted_buffer, mysql_key, key_len);
+      *converted_len = key_len;
+      return converted_buffer;
+    }
+  }
+  
+  // Fallback: return original key
+  memcpy(converted_buffer, mysql_key, key_len);
+  *converted_len = key_len;
+  return converted_buffer;
 }
 
 // uchar *ha_art::get_key2() {
@@ -667,9 +739,9 @@ int ha_art::delete_row(const uchar *buf) {
   index.
 */
 int ha_art::index_read(uchar *buf, const uchar *key, uint key_len, enum ha_rkey_function find_flag) {
-  long long pos;
-
   DBUG_ENTER("ha_art::index_read");
+
+
 
   // Reset range scan state
   range_scan_started = false;
@@ -678,30 +750,87 @@ int ha_art::index_read(uchar *buf, const uchar *key, uint key_len, enum ha_rkey_
     last_read_key = nullptr;
   }
 
+  // For exact match queries, use the fast direct lookup
+  if (find_flag == HA_READ_KEY_EXACT && key != NULL) {
+    // Convert MySQL key format to our internal memcomparable format
+    uint converted_len;
+    uchar *converted_key = convert_search_key(key, key_len, &converted_len);
+    
+    long long pos = share->index_class->get_index_pos(share->index_tree1, converted_key, converted_len);
+    if (pos == -1) {
+      DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
+    }
+    
+    current_position = pos + share->data_class->row_size(table->s->rec_buff_length);
+    share->data_class->read_row(buf, table->s->rec_buff_length, pos);
+    DBUG_RETURN(0);
+  }
+
+  // For range queries or special cases, use iterator
+  if (share->index_class->init_iterator(share->index_tree1) != 0) {
+    DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
+  }
+
+  art_leaf *leaf = nullptr;
+  
   if (key == NULL) {
-    pos = share->index_class->get_first_pos(share->index_tree1);
+    // No key provided, start from first
+    share->index_class->reset_to_first();
+    leaf = share->index_class->get_next_leaf();
   } else {
-    pos = share->index_class->get_index_pos(share->index_tree1, (uchar *)key, key_len);
+    // Convert MySQL key format to our internal memcomparable format for range operations
+    uint converted_len;
+    uchar *converted_key = convert_search_key(key, key_len, &converted_len);
+    
+    // Use the iterator for range positioning
+    switch (find_flag) {
+      case HA_READ_KEY_OR_NEXT:
+      case HA_READ_AFTER_KEY:
+        // Seek to the first key >= given key
+        if (share->index_class->seek_iterator(converted_key, converted_len) != 0) {
+          DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
+        }
+        leaf = share->index_class->get_next_leaf();
+        break;
+        
+      case HA_READ_BEFORE_KEY:
+      case HA_READ_KEY_OR_PREV:
+        // This would need more complex logic - for now use simple positioning
+        if (share->index_class->seek_iterator(converted_key, converted_len) != 0) {
+          share->index_class->reset_to_last();
+        }
+        leaf = share->index_class->get_prev_leaf();
+        break;
+        
+      default:
+        // Default: seek to position
+        if (share->index_class->seek_iterator(converted_key, converted_len) != 0) {
+          DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
+        }
+        leaf = share->index_class->get_next_leaf();
+        break;
+    }
   }
   
-  if (pos == -1) {
+  if (!leaf) {
     DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
   }
   
-  // Store the key for potential range scan later
-  if (key != NULL) {
-    last_read_key = (uchar*)my_malloc(PSI_NOT_INSTRUMENTED, key_len, MYF(0));
-    if (last_read_key) {
-      memcpy(last_read_key, key, key_len);
-      last_read_key_len = key_len;
-    }
-  } else {
-    last_read_key = nullptr;
-    last_read_key_len = 0;
+  // Mark range scan as started for subsequent index_next/index_prev calls
+  range_scan_started = true;
+  
+  // Save the key for potential range operations
+  last_read_key = (uchar*)my_malloc(PSI_NOT_INSTRUMENTED, leaf->key_len, MYF(0));
+  if (last_read_key) {
+    memcpy(last_read_key, leaf->key, leaf->key_len);
+    last_read_key_len = leaf->key_len;
   }
   
+  // Read the row data
+  long long pos = leaf->pos;
   current_position = pos + share->data_class->row_size(table->s->rec_buff_length);
   share->data_class->read_row(buf, table->s->rec_buff_length, pos);
+  
   DBUG_RETURN(0);
 }
 
@@ -713,29 +842,12 @@ int ha_art::index_next(uchar *buf) {
   DBUG_TRACE;
   DBUG_ENTER("ha_art::index_next");
   
-  // Initialize iterator only when we actually need range scanning
+  // If range scan hasn't started, initialize it
   if (!range_scan_started) {
     if (share->index_class->init_iterator(share->index_tree1) != 0) {
       DBUG_RETURN(HA_ERR_END_OF_FILE);
     }
-    
-    // Position iterator based on the last read key
-    if (last_read_key) {
-      share->index_class->seek_iterator(last_read_key, last_read_key_len);
-      // Skip the current record since we already returned it in index_read
-      art_leaf *current_leaf = share->index_class->get_next_leaf();
-      if (!current_leaf) {
-        DBUG_RETURN(HA_ERR_END_OF_FILE);
-      }
-    } else {
-      share->index_class->reset_to_first();
-      // Skip the first record since we already returned it in index_read  
-      art_leaf *current_leaf = share->index_class->get_next_leaf();
-      if (!current_leaf) {
-        DBUG_RETURN(HA_ERR_END_OF_FILE);
-      }
-    }
-    
+    share->index_class->reset_to_first();
     range_scan_started = true;
   }
   
@@ -761,24 +873,12 @@ int ha_art::index_prev(uchar *buf) {
   DBUG_TRACE;
   DBUG_ENTER("ha_art::index_prev");
   
-  // Initialize iterator only when we actually need range scanning
+  // If range scan hasn't started, initialize it
   if (!range_scan_started) {
     if (share->index_class->init_iterator(share->index_tree1) != 0) {
       DBUG_RETURN(HA_ERR_END_OF_FILE);
     }
-    
-    // Position iterator based on the last read key
-    if (last_read_key) {
-      share->index_class->seek_iterator(last_read_key, last_read_key_len);
-      // We need to position at the current record for reverse iteration
-      art_leaf *current_leaf = share->index_class->get_next_leaf();
-      if (!current_leaf) {
-        DBUG_RETURN(HA_ERR_END_OF_FILE);
-      }
-    } else {
-      share->index_class->reset_to_last();
-    }
-    
+    share->index_class->reset_to_last();
     range_scan_started = true;
   }
   
@@ -817,21 +917,22 @@ int ha_art::index_first(uchar *buf) {
   }
   last_read_key_len = 0;
   
-  // Get the first position directly
-  long long pos = share->index_class->get_first_pos(share->index_tree1);
-  if (pos == -1) {
+  // Initialize iterator
+  if (share->index_class->init_iterator(share->index_tree1) != 0) {
     DBUG_RETURN(HA_ERR_END_OF_FILE);
   }
   
-  // Initialize iterator for potential subsequent calls to index_next
-  if (share->index_class->init_iterator(share->index_tree1) == 0) {
-    share->index_class->reset_to_first();
-    // Skip the first record since we're returning it now
-    share->index_class->get_next_leaf();
-    range_scan_started = true;
+  share->index_class->reset_to_first();
+  range_scan_started = true;
+  
+  // Get the first leaf
+  art_leaf *leaf = share->index_class->get_next_leaf();
+  if (!leaf) {
+    DBUG_RETURN(HA_ERR_END_OF_FILE);
   }
   
   // Read the complete row data
+  long long pos = leaf->pos;
   current_position = pos + share->data_class->row_size(table->s->rec_buff_length);
   share->data_class->read_row(buf, table->s->rec_buff_length, pos);
   
@@ -859,25 +960,66 @@ int ha_art::index_last(uchar *buf) {
   }
   last_read_key_len = 0;
   
-  // Get the last position directly
-  long long pos = share->index_class->get_last_pos(share->index_tree1);
-  if (pos == -1) {
+  // Initialize iterator
+  if (share->index_class->init_iterator(share->index_tree1) != 0) {
     DBUG_RETURN(HA_ERR_END_OF_FILE);
   }
   
-  // Initialize iterator for potential subsequent calls to index_prev
-  if (share->index_class->init_iterator(share->index_tree1) == 0) {
-    share->index_class->reset_to_last();
-    // Skip the last record since we're returning it now
-    share->index_class->get_prev_leaf();
-    range_scan_started = true;
+  share->index_class->reset_to_last();
+  range_scan_started = true;
+  
+  // Get the last leaf
+  art_leaf *leaf = share->index_class->get_prev_leaf();
+  if (!leaf) {
+    DBUG_RETURN(HA_ERR_END_OF_FILE);
   }
   
   // Read the complete row data
+  long long pos = leaf->pos;
   current_position = pos + share->data_class->row_size(table->s->rec_buff_length);
   share->data_class->read_row(buf, table->s->rec_buff_length, pos);
   
   DBUG_RETURN(0);
+}
+
+/**
+  @brief
+  read_range_first() is called to read the first row in a range query.
+  
+  @details
+  This method handles the range query's start and end boundaries correctly.
+  It delegates to the base handler class for proper range checking.
+  
+  @param start_key    The start boundary for the range
+  @param end_key      The end boundary for the range  
+  @param eq_range_arg Whether this is an equality range
+  @param sorted       Whether results should be sorted
+*/
+int ha_art::read_range_first(const key_range *start_key, const key_range *end_key,
+                             bool eq_range_arg, bool sorted) {
+  DBUG_ENTER("ha_art::read_range_first");
+  
+  // Use the base handler implementation which provides proper range checking
+  int result = handler::read_range_first(start_key, end_key, eq_range_arg, sorted);
+  
+  DBUG_RETURN(result);
+}
+
+/**
+  @brief
+  read_range_next() is called to read the next row in a range query.
+  
+  @details
+  This method handles the range query's end boundary checking correctly.
+  It delegates to the base handler class for proper range checking.
+*/
+int ha_art::read_range_next() {
+  DBUG_ENTER("ha_art::read_range_next");
+  
+  // Use the base handler implementation which provides proper range checking
+  int result = handler::read_range_next();
+  
+  DBUG_RETURN(result);
 }
 
 /**
@@ -1268,7 +1410,12 @@ int ha_art::index_read_idx(uchar *buf, uint index, const uchar *key,
                                uint key_len, enum ha_rkey_function) {
   long long pos;
   DBUG_ENTER("ha_art::index_read_idx");
-  pos = share->index_class->get_index_pos(share->index_tree1 , (uchar *)key, key_len);
+  
+  // Convert MySQL key format to our internal memcomparable format
+  uint converted_len;
+  uchar *converted_key = convert_search_key(key, key_len, &converted_len);
+  
+  pos = share->index_class->get_index_pos(share->index_tree1, converted_key, converted_len);
   if (pos == -1)
     DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
   share->data_class->read_row(buf, table->s->rec_buff_length, pos);
