@@ -35,19 +35,46 @@
 #endif
 
 
-Art_index::Art_index(art_tree *t,int keylen)
+Art_index::Art_index(art_tree *t, int keylen)
 {
-    t->root = NULL;
-    t->size = 0;
-    max_key_len = keylen;
-    index_file = -1;
-    block_size = max_key_len + sizeof(long long) + sizeof(int);
+  DBUG_ENTER("Art_index::Art_index");
+  (void)t; // Suppress unused parameter warning
+  max_key_len = keylen;
+  index_file = -1;
+  
+  // Initialize iterator state
+  sorted_leaves = nullptr;
+  total_leaves = 0;
+  current_leaf_index = -1;
+  iterator_initialized = false;
+  
+  DBUG_VOID_RETURN;
 }
 
+Art_index::Art_index()
+{
+  DBUG_ENTER("Art_index::Art_index");
+  max_key_len = 0;
+  index_file = -1;
+  
+  // Initialize iterator state
+  sorted_leaves = nullptr;
+  total_leaves = 0;
+  current_leaf_index = -1;
+  iterator_initialized = false;
+  
+  DBUG_VOID_RETURN;
+}
 
 /* destructor */
 Art_index::~Art_index(void)
 {
+  DBUG_ENTER("Art_index::~Art_index");
+  
+  // Cleanup iterator state
+  cleanup_iterator();
+  
+  DBUG_VOID_RETURN;
 }
 
 /* create the index file */
@@ -60,7 +87,7 @@ int Art_index::create_index(char *path, int keylen)
     Block size is the key length plus the size of the index
     length variable.
   */
-  block_size = max_key_len + sizeof(long long);
+  block_size = max_key_len + sizeof(long long) + sizeof(int);
   DBUG_RETURN(0);
 }
 
@@ -970,55 +997,54 @@ int Art_index::destroy_index(art_tree *t) {
  * 收集ART树中的所有叶子节点（递归遍历）
  */
 void Art_index::collect_leaves(art_node *n, art_leaf **leaves, int *count, int max_count) {
-    if (!n || *count >= max_count) return;
-    
-    // 如果是叶子节点
-    if (IS_LEAF(n)) {
-        leaves[*count] = LEAF_RAW(n);
-        (*count)++;
+    if (!n || *count >= max_count) {
         return;
     }
     
-    // 递归遍历所有子节点
-    int i;
-    union {
-        art_node4 *p1;
-        art_node16 *p2;
-        art_node48 *p3;
-        art_node256 *p4;
-    } p;
+    // If this is a leaf node, add it to the array
+    if (IS_LEAF(n)) {
+        art_leaf *leaf = LEAF_RAW(n);
+        if (leaf) {
+            leaves[*count] = leaf;
+            (*count)++;
+        }
+        return;
+    }
     
+    // Otherwise, recursively collect from all children
     switch (n->type) {
-        case NODE4:
-            p.p1 = (art_node4*)n;
-            for (i = 0; i < n->num_children; i++) {
-                collect_leaves(p.p1->children[i], leaves, count, max_count);
+        case NODE4: {
+            art_node4 *node = (art_node4*)n;
+            for (int i = 0; i < node->n.num_children; i++) {
+                collect_leaves(node->children[i], leaves, count, max_count);
             }
             break;
-            
-        case NODE16:
-            p.p2 = (art_node16*)n;
-            for (i = 0; i < n->num_children; i++) {
-                collect_leaves(p.p2->children[i], leaves, count, max_count);
+        }
+        case NODE16: {
+            art_node16 *node = (art_node16*)n;
+            for (int i = 0; i < node->n.num_children; i++) {
+                collect_leaves(node->children[i], leaves, count, max_count);
             }
             break;
-            
-        case NODE48:
-            p.p3 = (art_node48*)n;
-            for (i = 0; i < 256; i++) {
-                int idx = p.p3->keys[i];
-                if (!idx) continue;
-                collect_leaves(p.p3->children[idx-1], leaves, count, max_count);
+        }
+        case NODE48: {
+            art_node48 *node = (art_node48*)n;
+            for (int i = 0; i < 256; i++) {
+                if (node->keys[i] != 0) {
+                    collect_leaves(node->children[node->keys[i] - 1], leaves, count, max_count);
+                }
             }
             break;
-            
-        case NODE256:
-            p.p4 = (art_node256*)n;
-            for (i = 0; i < 256; i++) {
-                if (p.p4->children[i])
-                    collect_leaves(p.p4->children[i], leaves, count, max_count);
+        }
+        case NODE256: {
+            art_node256 *node = (art_node256*)n;
+            for (int i = 0; i < 256; i++) {
+                if (node->children[i]) {
+                    collect_leaves(node->children[i], leaves, count, max_count);
+                }
             }
             break;
+        }
     }
 }
 
@@ -1136,4 +1162,150 @@ int Art_index::close_index() {
     }
     
     DBUG_RETURN(0);
+}
+
+/**
+ * Range scan support - Iterator implementation
+ */
+
+// Compare function for sorting leaves
+int Art_index::compare_leaves(const void *a, const void *b) {
+    const art_leaf *leaf1 = *(const art_leaf* const*)a;
+    const art_leaf *leaf2 = *(const art_leaf* const*)b;
+    
+    int min_len = (leaf1->key_len < leaf2->key_len) ? leaf1->key_len : leaf2->key_len;
+    int result = memcmp(leaf1->key, leaf2->key, min_len);
+    
+    if (result == 0) {
+        // If prefixes are equal, shorter key comes first
+        return leaf1->key_len - leaf2->key_len;
+    }
+    
+    return result;
+}
+
+// Build sorted array of leaf pointers for iteration
+int Art_index::build_sorted_leaf_array(const art_tree *t) {
+    if (!t || !t->root) {
+        return -1;
+    }
+    
+    // Cleanup any existing iterator
+    cleanup_iterator();
+    
+    // Allocate array for maximum possible leaves
+    int max_leaves = t->size + 100;
+    sorted_leaves = (art_leaf**)malloc(max_leaves * sizeof(art_leaf*));
+    if (!sorted_leaves) {
+        return -1;
+    }
+    
+    // Collect all leaves
+    total_leaves = 0;
+    collect_leaves(t->root, sorted_leaves, &total_leaves, max_leaves);
+    
+    // Sort the leaves by key value
+    qsort(sorted_leaves, total_leaves, sizeof(art_leaf*), compare_leaves);
+    
+    iterator_initialized = true;
+    current_leaf_index = -1;
+    
+    return 0;
+}
+
+// Clean up iterator state
+void Art_index::cleanup_iterator() {
+    if (sorted_leaves) {
+        free(sorted_leaves);
+        sorted_leaves = nullptr;
+    }
+    total_leaves = 0;
+    current_leaf_index = -1;
+    iterator_initialized = false;
+}
+
+// Initialize iterator for range scan
+int Art_index::init_iterator(const art_tree *t) {
+    return build_sorted_leaf_array(t);
+}
+
+// Reset iterator to first position
+int Art_index::reset_to_first() {
+    if (!iterator_initialized) {
+        return -1;
+    }
+    current_leaf_index = -1;
+    return 0;
+}
+
+// Reset iterator to last position
+int Art_index::reset_to_last() {
+    if (!iterator_initialized) {
+        return -1;
+    }
+    current_leaf_index = total_leaves;
+    return 0;
+}
+
+// Get the next leaf in iteration order
+art_leaf* Art_index::get_next_leaf() {
+    if (!iterator_initialized || current_leaf_index >= total_leaves - 1) {
+        return nullptr;
+    }
+    
+    current_leaf_index++;
+    return sorted_leaves[current_leaf_index];
+}
+
+// Get the previous leaf in iteration order
+art_leaf* Art_index::get_prev_leaf() {
+    if (!iterator_initialized || current_leaf_index <= 0) {
+        return nullptr;
+    }
+    
+    current_leaf_index--;
+    return sorted_leaves[current_leaf_index];
+}
+
+// Set iterator to specific key position
+int Art_index::seek_iterator(const uchar *key, int key_len) {
+    if (!iterator_initialized) {
+        return -1;
+    }
+    
+    // Binary search to find the exact position or the position just before it
+    int left = 0;
+    int right = total_leaves - 1;
+    int target_pos = -1;
+    
+    while (left <= right) {
+        int mid = (left + right) / 2;
+        art_leaf *leaf = sorted_leaves[mid];
+        
+        int min_len = (leaf->key_len < key_len) ? leaf->key_len : key_len;
+        int cmp = memcmp(leaf->key, key, min_len);
+        
+        if (cmp == 0) {
+            if (leaf->key_len == key_len) {
+                // Exact match found - set position to just before this key
+                current_leaf_index = mid - 1;
+                return 0;
+            } else if (leaf->key_len < key_len) {
+                cmp = -1;
+            } else {
+                cmp = 1;
+            }
+        }
+        
+        if (cmp < 0) {
+            target_pos = mid;
+            left = mid + 1;
+        } else {
+            right = mid - 1;
+        }
+    }
+    
+    // Set position to the last key that is less than the search key
+    current_leaf_index = target_pos;
+    return 0;
 }

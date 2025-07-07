@@ -190,6 +190,20 @@ public:
   // Close index file
   int close_index();
 
+  // Range scan support - Iterator methods
+  // Initialize iterator for range scan
+  int init_iterator(const art_tree *t);
+  // Get the next key in iteration order
+  art_leaf* get_next_leaf();
+  // Get the previous key in iteration order
+  art_leaf* get_prev_leaf();
+  // Reset iterator to first position
+  int reset_to_first();
+  // Reset iterator to last position
+  int reset_to_last();
+  // Set iterator to specific key position
+  int seek_iterator(const uchar *key, int key_len);
+
   //art_tree *index_tree;
 private:
   File index_file;
@@ -197,6 +211,17 @@ private:
   int block_size;
   // 辅助方法：收集ART树中的所有叶子节点
   void collect_leaves(art_node *n, art_leaf **leaves, int *count, int max_count);
+  
+  // Iterator state for range scans
+  art_leaf **sorted_leaves;  // Array of sorted leaf pointers
+  int total_leaves;          // Total number of leaves
+  int current_leaf_index;    // Current position in iteration
+  bool iterator_initialized; // Whether iterator is ready
+  
+  // Helper methods for iterator
+  int build_sorted_leaf_array(const art_tree *t);
+  void cleanup_iterator();
+  static int compare_leaves(const void *a, const void *b);
 };
 
 

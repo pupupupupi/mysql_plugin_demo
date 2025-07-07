@@ -257,25 +257,9 @@ class ha_art : public handler {
   virtual int index_read_idx(uchar *buf, uint index, const uchar *key,
                              uint key_len, enum ha_rkey_function find_flag);
 
-  // int index_next(uchar *buf) override;
-
-  /** @brief
-    We implement this in ha_example.cc. It's not an obligatory method;
-    skip it and and MySQL will treat it as not implemented.
-  */
-  // int index_read_map(uchar *buf, const uchar *key, key_part_map keypart_map,enum ha_rkey_function find_flag) override;
-
-  // /** @brief
-  //   We implement this in ha_example.cc. It's not an obligatory method;
-  //   skip it and and MySQL will treat it as not implemented.
-  // */
-  // // int index_next(uchar *buf) override;
-
-  // /** @brief
-  //   We implement this in ha_example.cc. It's not an obligatory method;
-  //   skip it and and MySQL will treat it as not implemented.
-  // */
-  // int index_prev(uchar *buf) override;
+  // Range scan support methods
+  int index_next(uchar *buf) override;
+  int index_prev(uchar *buf) override;
 
   /** @brief
     We implement this in ha_example.cc. It's not an obligatory method;
