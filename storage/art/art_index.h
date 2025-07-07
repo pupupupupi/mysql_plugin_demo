@@ -213,6 +213,8 @@ private:
     int capacity;               // Array capacity
     bool valid;                 // Iterator validity
     unsigned long cache_version; // Version for cache invalidation
+    int max_capacity_used;      // Track historical peak usage
+    int resize_count;           // Count of resize operations
   };
   
   // Iterator state
@@ -224,6 +226,11 @@ private:
   void collect_all_leaves(art_node *node, art_leaf ***leaves_ptr, int *count, int *capacity);
   void resize_leaf_array(art_leaf ***leaves_ptr, int *capacity);
   static int compare_leaf_keys(const void *a, const void *b);
+  
+  // Dynamic capacity management
+  int calculate_initial_capacity(const art_tree *t);
+  int calculate_resize_capacity(int current_capacity, int current_count);
+  int get_resize_threshold(int capacity);
 };
 
 

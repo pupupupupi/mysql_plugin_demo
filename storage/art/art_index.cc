@@ -52,6 +52,8 @@ Art_index::Art_index(art_tree *t, int keylen)
   iterator.capacity = 0;
   iterator.valid = false;
   iterator.cache_version = 0;
+  iterator.max_capacity_used = 0;
+  iterator.resize_count = 0;
   tree_version = 1; // Start with version 1
   
   DBUG_VOID_RETURN;
@@ -71,6 +73,8 @@ Art_index::Art_index()
   iterator.capacity = 0;
   iterator.valid = false;
   iterator.cache_version = 0;
+  iterator.max_capacity_used = 0;
+  iterator.resize_count = 0;
   tree_version = 1; // Start with version 1
   
   DBUG_VOID_RETURN;
@@ -1139,16 +1143,10 @@ int Art_index::close_index() {
  * Simple iterator implementation using leaf collection and sorting
  */
 
-// Helper: Resize leaf array when needed (optimized allocation strategy)
+// Helper: Resize leaf array when needed (dynamic allocation strategy)
 void Art_index::resize_leaf_array(art_leaf ***leaves_ptr, int *capacity) {
-    int new_capacity;
-    if (*capacity == 0) {
-        new_capacity = 10000; // Start with larger initial capacity
-    } else if (*capacity < 100000) {
-        new_capacity = *capacity * 2; // Double for smaller arrays
-    } else {
-        new_capacity = *capacity + 50000; // Linear growth for large arrays
-    }
+    int current_count = iterator.total_leaves;
+    int new_capacity = calculate_resize_capacity(*capacity, current_count);
     
     art_leaf **new_leaves = (art_leaf**)realloc(*leaves_ptr, new_capacity * sizeof(art_leaf*));
     if (new_leaves) {
@@ -1165,8 +1163,9 @@ void Art_index::collect_all_leaves(art_node *node, art_leaf ***leaves_ptr, int *
     if (IS_LEAF(node)) {
         art_leaf *leaf = LEAF_RAW(node);
         if (leaf && leaf->key_len > 0) {
-            // Resize array if needed (with some headroom to reduce reallocations)
-            if (*count >= *capacity - 100) { // Resize earlier to avoid frequent reallocations
+            // Resize array if needed (using dynamic threshold)
+            int resize_threshold = get_resize_threshold(*capacity);
+            if (*count >= resize_threshold) {
                 resize_leaf_array(leaves_ptr, capacity);
                 if (!*leaves_ptr) return; // Allocation failed
             }
@@ -1249,6 +1248,7 @@ void Art_index::cleanup_iterator() {
     iterator.capacity = 0;
     iterator.valid = false;
     iterator.cache_version = 0; // Reset cache version
+    // Note: Preserve max_capacity_used and resize_count for historical learning
 }
 
 // Initialize iterator with caching
@@ -1271,9 +1271,18 @@ int Art_index::init_iterator(const art_tree *t) {
     cleanup_iterator();
     
     iter_tree = t;
-    iterator.capacity = 0;
     iterator.total_leaves = 0;
     iterator.current_index = -1;
+    
+    // Calculate smart initial capacity
+    iterator.capacity = calculate_initial_capacity(t);
+    
+    // Pre-allocate array with calculated capacity
+    iterator.leaves = (art_leaf**)malloc(iterator.capacity * sizeof(art_leaf*));
+    if (!iterator.leaves) {
+        iterator.capacity = 0;
+        return -1;
+    }
     
     // Collect all leaves
     collect_all_leaves(t->root, &iterator.leaves, &iterator.total_leaves, &iterator.capacity);
@@ -1379,4 +1388,104 @@ art_leaf* Art_index::get_prev_leaf() {
     }
     
     return nullptr;
+}
+
+/**
+ * Dynamic capacity management methods
+ */
+
+// Calculate initial capacity based on tree size and historical data
+int Art_index::calculate_initial_capacity(const art_tree *t) {
+    if (!t) return 1000; // Fallback minimum
+    
+    // Base calculation on tree size
+    int tree_size = (int)t->size;
+    int base_capacity;
+    
+    if (tree_size == 0) {
+        base_capacity = 1000; // Default for empty trees
+    } else if (tree_size <= 10000) {
+        // For small trees: 20% overhead
+        base_capacity = tree_size + (tree_size / 5);
+    } else if (tree_size <= 100000) {
+        // For medium trees: 15% overhead
+        base_capacity = tree_size + (tree_size / 7);
+    } else {
+        // For large trees: 10% overhead
+        base_capacity = tree_size + (tree_size / 10);
+    }
+    
+    // Factor in historical usage patterns
+    if (iterator.max_capacity_used > 0) {
+        // Use historical peak + 25% growth buffer
+        int historical_prediction = iterator.max_capacity_used + (iterator.max_capacity_used / 4);
+        
+        // Take the larger of tree-based or historical prediction
+        base_capacity = (historical_prediction > base_capacity) ? historical_prediction : base_capacity;
+    }
+    
+    // Ensure minimum viable capacity
+    if (base_capacity < 1000) base_capacity = 1000;
+    
+    // Round up to next power of 2 for better memory alignment (optional optimization)
+    // Comment out if memory usage is more important than alignment
+    /*
+    int power_of_2 = 1;
+    while (power_of_2 < base_capacity) {
+        power_of_2 <<= 1;
+    }
+    return power_of_2;
+    */
+    
+    return base_capacity;
+}
+
+// Calculate new capacity when resize is needed
+int Art_index::calculate_resize_capacity(int current_capacity, int current_count) {
+    iterator.resize_count++;
+    
+    // Update historical peak usage
+    if (current_count > iterator.max_capacity_used) {
+        iterator.max_capacity_used = current_count;
+    }
+    
+    int new_capacity;
+    
+    // Adaptive growth strategy based on size and resize frequency
+    if (current_capacity == 0) {
+        // First allocation - use smart initial sizing
+        const art_tree *t = iter_tree;
+        new_capacity = calculate_initial_capacity(t);
+    } else if (current_capacity < 10000) {
+        // Small arrays: aggressive growth (2x)
+        new_capacity = current_capacity * 2;
+    } else if (current_capacity < 100000) {
+        // Medium arrays: moderate growth (1.5x)
+        new_capacity = current_capacity + (current_capacity / 2);
+    } else if (iterator.resize_count > 5) {
+        // Large arrays that resize frequently: more aggressive growth
+        new_capacity = current_capacity + (current_capacity / 2);
+    } else {
+        // Large arrays: conservative growth (1.25x)
+        new_capacity = current_capacity + (current_capacity / 4);
+    }
+    
+    // Ensure we have sufficient headroom for the current request
+    int min_needed = current_count + (current_count / 10) + 1000; // 10% buffer + 1000 safety
+    if (new_capacity < min_needed) {
+        new_capacity = min_needed;
+    }
+    
+    return new_capacity;
+}
+
+// Get threshold for when to trigger resize (with headroom)
+int Art_index::get_resize_threshold(int capacity) {
+    if (capacity <= 10000) {
+        return capacity - 500; // Resize when 500 away from limit for small arrays
+    } else if (capacity <= 100000) {
+        return capacity - 2000; // Resize when 2000 away for medium arrays
+    } else {
+        return capacity - 5000; // Resize when 5000 away for large arrays
+    }
 }
