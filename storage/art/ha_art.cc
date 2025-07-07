@@ -74,6 +74,8 @@
   ha_example::rnd_next
   ha_example::rnd_next
   ha_example::rnd_next
+  ha_example::rnd_next
+  ha_example::rnd_next
   ha_example::extra
   ha_example::external_lock
   ha_example::extra
@@ -298,7 +300,7 @@ int ha_art::open(const char *name, int mode, uint test_if_lock, const dd::Table 
   // 从文件加载索引
   share->index_class->load_index(share->index_tree1);
   
-  // 用current_positio初始化位置
+  // 用current_position初始化位置
   current_position = 0;
   thr_lock_data_init(&share->lock, &lock, nullptr);
 
@@ -323,16 +325,21 @@ int ha_art::open(const char *name, int mode, uint test_if_lock, const dd::Table 
 int ha_art::close(void) {
   DBUG_TRACE;
   DBUG_ENTER("ha_art::close");
+  
   share->data_class->close_table();
+  
+  // 保存索引到文件
   share->index_class->save_index(share->index_tree1);
+  
+  // 销毁内存中的索引
   share->index_class->destroy_index(share->index_tree1);
   share->index_class->close_index();
-  //TODO index
+  
   DBUG_RETURN(0);
 }
 
 uchar *ha_art::get_key() {
-  uchar *key = nullptr;
+  static uchar key_buffer[256]; // 使用静态缓冲区避免内存泄漏
   DBUG_ENTER("ha_art::get_key");  
   /*
   For each field in the table, check to see if it is the key
@@ -342,15 +349,61 @@ uchar *ha_art::get_key() {
   {
     if ((*field)->key_start.to_ulonglong() == 1)
     {
-      /*
-      Copy field value to key value (save key)
-      */
-      key = (uchar *)my_malloc(PSI_NOT_INSTRUMENTED,((*field)->field_length),MYF(MY_ZEROFILL | MY_WME));
-      memcpy(key, (*field)->field_ptr(), (*field)->key_length());
-      DBUG_RETURN(key);
+      memset(key_buffer, 0, sizeof(key_buffer));
+      
+      // Get field type and handle accordingly
+      const uchar *field_ptr = (*field)->field_ptr();
+      enum_field_types field_type = (*field)->type();
+      
+      switch (field_type) {
+        case MYSQL_TYPE_LONG:       // INT
+        case MYSQL_TYPE_LONGLONG:   // BIGINT
+        case MYSQL_TYPE_INT24:      // MEDIUMINT
+        case MYSQL_TYPE_SHORT:      // SMALLINT
+        case MYSQL_TYPE_TINY:       // TINYINT
+        {
+          // For integer fields, copy the raw bytes directly
+          uint field_length = (*field)->pack_length();
+          memcpy(key_buffer, field_ptr, field_length);
+          break;
+        }
+        
+        case MYSQL_TYPE_VARCHAR:
+        case MYSQL_TYPE_VAR_STRING:
+        case MYSQL_TYPE_STRING:
+        {
+          // For VARCHAR fields, use the format that matches MySQL's key lookups
+          uint field_length = (*field)->pack_length();
+          
+          // Copy the length byte first
+          if (field_length > 0) {
+            key_buffer[0] = field_ptr[0]; // Length byte
+          }
+          
+          // Add a zero byte to match MySQL's key format during lookups
+          if (field_length > 1) {
+            key_buffer[1] = 0x00;
+            // Copy the actual string data starting from position 2
+            if (field_ptr[0] > 0 && field_ptr[0] < field_length) {
+              memcpy(key_buffer + 2, field_ptr + 1, field_ptr[0]);
+            }
+          }
+          break;
+        }
+        
+        default:
+        {
+          // For other field types, copy as-is
+          uint field_length = (*field)->pack_length();
+          memcpy(key_buffer, field_ptr, field_length);
+          break;
+        }
+      }
+      
+      DBUG_RETURN(key_buffer);
     }
   }
-  DBUG_RETURN(key);
+  DBUG_RETURN(nullptr);
 }
 
 // uchar *ha_art::get_key2() {
@@ -376,8 +429,7 @@ uchar *ha_art::get_key() {
 
 int ha_art::get_key_len()
 {
-  int length = 0;
-  DBUG_ENTER("ha_art::get_key");
+  DBUG_ENTER("ha_art::get_key_len");
   /*
   For each field in the table, check to see if it is the key
   by checking the key_start variable. (1 = is a key).
@@ -385,14 +437,39 @@ int ha_art::get_key_len()
   for (Field **field=table->field ; *field ; field++)
   {
     if ((*field)->key_start.to_ulonglong() == 1)
-    /*
-    Copy field length to key length
-    */
-    length = (*field)->key_length();
-
-    DBUG_RETURN(length);
+    {
+      uint pack_length = (*field)->pack_length();
+      enum_field_types field_type = (*field)->type();
+      
+      switch (field_type) {
+        case MYSQL_TYPE_LONG:       // INT
+        case MYSQL_TYPE_LONGLONG:   // BIGINT
+        case MYSQL_TYPE_INT24:      // MEDIUMINT
+        case MYSQL_TYPE_SHORT:      // SMALLINT
+        case MYSQL_TYPE_TINY:       // TINYINT
+        {
+          // For integer fields, key length equals pack length
+          DBUG_RETURN(pack_length);
+        }
+        
+        case MYSQL_TYPE_VARCHAR:
+        case MYSQL_TYPE_VAR_STRING:
+        case MYSQL_TYPE_STRING:
+        {
+          // For VARCHAR fields, add 1 for the extra 0x00 byte that MySQL adds during lookups
+          uint key_length = pack_length + 1;
+          DBUG_RETURN(key_length);
+        }
+        
+        default:
+        {
+          // For other field types, use pack length
+          DBUG_RETURN(pack_length);
+        }
+      }
+    }
   }
- DBUG_RETURN(length);
+  DBUG_RETURN(0);
 }
 
 
@@ -456,31 +533,20 @@ int ha_art::get_key_len()
 int ha_art::write_row(uchar *buf) {
   DBUG_TRACE;
   long long pos;
-  // art_tree *index_tree;
-  // art_tree *index_tree = (art_tree*)malloc(sizeof(art_tree));
-  // art_leaf *leaf;
-  //art_leaf *leaf = (art_leaf*)malloc(sizeof(art_leaf));
   DBUG_ENTER("ha_art::write_row");
 
   ha_statistic_increment(&System_status_var::ha_write_count);
-  // TODO index
-  //leaf->key_len = get_key_len();
-  //memcpy(leaf->key, get_key(), get_key_len());
-
   
   mysql_mutex_lock(&share->mutex);
 
   pos = share->data_class->write_row(buf, table->s->rec_buff_length);
-  //   // 索引地址
-  // pos = share->index_class->write_row(&ndx);
-  // 数据地址
-  //leaf->pos = pos;
 
-  if ((get_key() != 0) && (get_key_len() != 0))
-    share->index_class->insert_key(share->index_tree1, get_key(), pos, get_key_len());
-
-  // if ((get_key2() != 0) && (get_key_len2() != 0))
-  //   share->index_class->insert_key(share->index_tree1, get_key2(), pos, get_key_len2());
+  uchar *key = get_key();
+  int key_len = get_key_len();
+  
+  if (key != nullptr && key_len > 0) {
+    long long result = share->index_class->insert_key(share->index_tree1, key, pos, key_len);
+  }
   
   mysql_mutex_unlock(&share->mutex);
   DBUG_RETURN(0);
@@ -587,31 +653,24 @@ int ha_art::delete_row(const uchar *buf) {
   index.
 */
 
-// int ha_art::index_read_map(uchar *buf, const uchar *key, key_part_map keypart_map,enum ha_rkey_function find_flag) {
-//   DBUG_TRACE;
-//   DBUG_ENTER("ha_art::index_read_map");
+int ha_art::index_read(uchar *buf, const uchar *key, uint key_len, enum ha_rkey_function find_flag) {
+  long long pos;
 
-//   // Find the key in the index based on the provided key value and find_flag
-//   art_leaf* art_leaf2 = share->index_class->seek_index(share->index_tree1, (uchar*)key, get_key_len());
+  DBUG_ENTER("ha_art::index_read");
 
-//   if (art_leaf2 == NULL)
-//   {
-//     DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
-//   }
-
-//   // Get the position of the found key in the data file
-//   long long pos = share->index_class->get_index_pos(share->index_tree1 ,(uchar *)key, get_key_len());
-
-//   if (pos == -1)
-//   {
-//     DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
-//   }
-
-//   // Read the row data from the data file
-//   share->data_class->read_row(buf, table->s->rec_buff_length, pos);
-
-//   DBUG_RETURN(0);
-// }
+  if (key == NULL)
+    pos = share->index_class->get_first_pos(share->index_tree1);
+  else
+    pos = share->index_class->get_index_pos(share->index_tree1 ,(uchar *)key, key_len);
+  
+  if (pos == -1) {
+    DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
+  }
+  
+  current_position = pos + share->data_class->row_size(table->s->rec_buff_length);
+  share->data_class->read_row(buf, table->s->rec_buff_length, pos);
+  DBUG_RETURN(0);
+}
 
 /**
   @brief
@@ -1087,24 +1146,6 @@ int ha_art::rename_table(const char * from, const char * to,  const dd::Table *f
     DBUG_RETURN(0);
 }
 
-
-int ha_art::index_read(uchar *buf, const uchar *key, uint key_len, enum ha_rkey_function find_flag) {
-  long long pos;
-
-  DBUG_ENTER("ha_archive::index_read");
-
-  if (key == NULL)
-    pos = share->index_class->get_first_pos(share->index_tree1);
-  else
-    pos = share->index_class->get_index_pos(share->index_tree1 ,(uchar *)key, key_len);
-  if (pos == -1)
-    DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
-  current_position = pos + share->data_class->row_size(table->s->rec_buff_length);
-  share->data_class->read_row(buf, table->s->rec_buff_length, pos);
-  // share->index_class->get_next_key();
-  DBUG_RETURN(0);
-
-}
 
 int ha_art::index_read_idx(uchar *buf, uint index, const uchar *key,
                                uint key_len, enum ha_rkey_function) {

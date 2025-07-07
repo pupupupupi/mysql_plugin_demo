@@ -285,10 +285,23 @@ int Art_index::check_prefix(const art_node *n, const uchar *key, int key_len, in
 int Art_index::leaf_matches(const art_leaf *n, const uchar *key, int key_len, int depth) {
     (void)depth;
     // Fail if the key lengths are different
-    if (n->key_len != (int)key_len) return 1;
+    if (n->key_len != key_len) return 1;
 
-    // Compare the keys starting at the depth
-    return memcmp(n->key, key, key_len);
+    // For VARCHAR fields, we need to compare the actual string content
+    // Skip the length prefix if present and compare actual data
+    int actual_len = key_len;
+    const uchar *leaf_key = n->key;
+    const uchar *search_key = key;
+    
+    // Check if this is a VARCHAR field with length prefix
+    if (key_len > 1) {
+        // For VARCHAR(4), MySQL stores 1-2 bytes for length + actual string
+        // We'll compare the entire field including length prefix for now
+        // This ensures exact matching for the field format
+    }
+
+    // Compare the keys exactly as stored
+    return memcmp(leaf_key, search_key, actual_len);
 }
 
 
@@ -893,13 +906,18 @@ long long Art_index::get_index_pos(const art_tree *t, const uchar *key, int key_
   art_node **child;
   art_node *n = t->root;
   int prefix_len, depth = 0;
+  
   while (n) {
       // Might be a leaf
       if (IS_LEAF(n)) {
           n = (art_node*)LEAF_RAW(n);
+          art_leaf *leaf = (art_leaf*)n;
+          
           // Check if the expanded path matches
-          if (!leaf_matches((art_leaf*)n, key, key_len, depth)) {
-              return ((art_leaf*)n)->pos;
+          int match_result = leaf_matches(leaf, key, key_len, depth);
+          
+          if (match_result == 0) {
+              return leaf->pos;
           }
           return 0;
       }
@@ -1070,6 +1088,7 @@ int Art_index::load_index(art_tree *t) {
     }
     
     // 读取并重建每个索引项
+    int loaded_count = 0;
     for (int i = 0; i < leaf_count; i++) {
         int key_len;
         uchar key[256]; // 假设key最大256字节
@@ -1080,11 +1099,14 @@ int Art_index::load_index(art_tree *t) {
             break;
         }
         
+        // 检查键长度是否合理
+        if (key_len <= 0 || key_len >= 256) {
+            continue;
+        }
+        
         // 读取 key
-        if (key_len > 0 && key_len < 256) {
-            if (my_read(index_file, key, key_len, MYF(0)) != (size_t)key_len) {
-                break;
-            }
+        if (my_read(index_file, key, key_len, MYF(0)) != (size_t)key_len) {
+            break;
         }
         
         // 读取 pos
@@ -1092,8 +1114,11 @@ int Art_index::load_index(art_tree *t) {
             break;
         }
         
-        // 重新插入索引
-        insert_key(t, key, pos, key_len);
+        // 直接插入索引（现在键格式应该是正确的）
+        long long result = insert_key(t, key, pos, key_len);
+        if (result == 0) {
+            loaded_count++;
+        }
     }
     
     DBUG_RETURN(0);
