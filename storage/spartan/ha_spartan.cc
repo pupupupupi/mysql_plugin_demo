@@ -149,6 +149,12 @@ Spartan_share::Spartan_share()
    //TODO index class implementation
 }
 
+static const char *ha_spartan_exts[] = {
+  SDE_EXT,
+  SDI_EXT,
+  NullS
+};
+
 static int spartan_init_func(void *p) {
   DBUG_TRACE;
   DBUG_ENTER("spartan_init_func");
@@ -160,6 +166,7 @@ static int spartan_init_func(void *p) {
   spartan_hton->state = SHOW_OPTION_YES;
   spartan_hton->create = spartan_create_handler;
   spartan_hton->flags = HTON_CAN_RECREATE;
+  spartan_hton->file_extensions = ha_spartan_exts;
   spartan_hton->is_supported_system_table = spartan_is_supported_system_table;
 
   DBUG_RETURN(0);
@@ -198,13 +205,6 @@ static handler *spartan_create_handler(handlerton *hton, TABLE_SHARE *table,
 
 ha_spartan::ha_spartan(handlerton *hton, TABLE_SHARE *table_arg)
     : handler(hton, table_arg) {}
-
-
-static const char *ha_spartan_exts[] = {
-  SDE_EXT,
-  SDI_EXT,
-  NullS
-};
 
 const char **ha_spartan::bas_ext() const 
 {
