@@ -340,6 +340,7 @@ uchar *ha_spartan::get_key() {
       */
       key = (uchar *)my_malloc(PSI_NOT_INSTRUMENTED,((*field)->field_length),MYF(MY_ZEROFILL | MY_WME));
       memcpy(key, (*field)->field_ptr(), (*field)->key_length());
+      DBUG_RETURN(key);
     }
   }
   DBUG_RETURN(key);
@@ -362,6 +363,8 @@ int ha_spartan::get_key_len()
     Copy field length to key length
     */
     length = (*field)->key_length();
+
+    DBUG_RETURN(length);
   }
  DBUG_RETURN(length);
 }
@@ -1014,7 +1017,8 @@ int ha_spartan::index_read(uchar *buf, const uchar *key, uint key_len, enum ha_r
   long long pos;
 
   DBUG_ENTER("ha_archive::index_read");
-  if (key == nullptr)
+
+  if (key == NULL)
     pos = share->index_class->get_first_pos();
   else
     pos = share->index_class->get_index_pos((uchar *)key, key_len);
@@ -1035,6 +1039,7 @@ int ha_spartan::index_read_idx(uchar *buf, uint index, const uchar *key,
   if (pos == -1)
     DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
   share->data_class->read_row(buf, table->s->rec_buff_length, pos);
+
   DBUG_RETURN(0);
 }
 
@@ -1090,7 +1095,7 @@ int ha_spartan::create(const char *name, TABLE *table_arg,
     char name_buff[FN_REFLEN];
 
     if (!(share = get_share()))
-        DBUG_RETURN(1);
+      DBUG_RETURN(1);
     /*
     * Call the data class create table method.
     * Note: the fn_format() method correctly creates a file name from the name
@@ -1107,7 +1112,7 @@ int ha_spartan::create(const char *name, TABLE *table_arg,
     //TODO index
     // fn_format(name_buff, name, "", SDI_EXT, MY_REPLACE_EXT | MY_UNPACK_FILENAME);
     fn_format(name_buff, name, "", SDI_EXT, MY_UNPACK_FILENAME | MY_APPEND_EXT);
-    if (share->index_class->create_index(name_buff,128))
+    if (share->index_class->create_index(name_buff,4))
     {
         DBUG_PRINT("info", ("hot here 1"));
         DBUG_RETURN(-1);

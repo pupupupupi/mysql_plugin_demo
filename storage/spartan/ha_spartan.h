@@ -130,7 +130,7 @@ class ha_spartan : public handler {
       an engine that can only handle statement-based logging. This is
       used in testing.
     */
-    return (HA_NO_BLOBS | HA_BINLOG_STMT_CAPABLE | HA_BINLOG_ROW_CAPABLE);;
+    return (HA_NO_BLOBS | HA_BINLOG_ROW_CAPABLE | HA_BINLOG_STMT_CAPABLE);
   }
 
   /** @brief
@@ -191,7 +191,7 @@ class ha_spartan : public handler {
     There is no need to implement ..._key_... methods if your engine doesn't
     support indexes.
    */
-  uint max_supported_key_length() const { return 128; }
+  uint max_supported_key_length() const { return 4; }
 
   /** @brief
     Called in test_quick_select to determine if indexes should be used.

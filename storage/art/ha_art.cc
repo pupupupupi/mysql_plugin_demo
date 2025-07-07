@@ -1205,10 +1205,10 @@ static int srv_signed_int_var = 0;
 static long srv_signed_long_var = 0;
 static longlong srv_signed_longlong_var = 0;
 
-const char *enum_var_names1[] = {"art_test1", "art_test2", NullS};
+const char *enum_var_names2[] = {"art_test1", "art_test2", NullS};
 
-TYPELIB enum_var_typelib1 = {array_elements(enum_var_names1) - 1,
-                            "enum_var_typelib1", enum_var_names1, nullptr};
+TYPELIB enum_var_typelib2 = {array_elements(enum_var_names2) - 1,
+                            "enum_var_typelib2", enum_var_names2, nullptr};
 
 static MYSQL_SYSVAR_ENUM(enum_var,                        // name
                          srv_enum_var,                    // varname
@@ -1217,7 +1217,7 @@ static MYSQL_SYSVAR_ENUM(enum_var,                        // name
                          nullptr,                         // check
                          nullptr,                         // update
                          0,                               // def
-                         &enum_var_typelib1);              // typelib
+                         &enum_var_typelib2);              // typelib
 
 static MYSQL_SYSVAR_ULONG(ulong_var, srv_ulong_var, PLUGIN_VAR_RQCMDARG,
                           "0..1000", nullptr, nullptr, 8, 0, 1000, 0);
