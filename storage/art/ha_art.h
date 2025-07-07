@@ -48,23 +48,25 @@
 #include "sql/handler.h"
 #include "sql/table.h"
 
-#include "storage/spartan/spartan_data.h"
-#include "storage/spartan/spartan_index.h"
+#include "storage/art/art_data.h"
+#include "storage/art/art_index.h"
 
 /** @brief
-  Spartan_share is a class that will be shared among all open handlers.
+  Art_share is a class that will be shared among all open handlers.
   This example implements the minimum of what you will probably need.
 */
-class Spartan_share : public Handler_share {
+class Art_share : public Handler_share {
  public:
   THR_LOCK lock;
   mysql_mutex_t mutex;
 
-  Spartan_data *data_class;
-  Spartan_index *index_class;
+  Art_data *data_class;
+  Art_index *index_class;
+  art_tree *index_tree1;
   
-  Spartan_share();
-  ~Spartan_share() 
+  
+  Art_share();
+  ~Art_share() 
   {
     thr_lock_delete(&lock);
     mysql_mutex_destroy(&mutex);
@@ -75,8 +77,12 @@ class Spartan_share : public Handler_share {
     if (index_class != NULL) {
       delete index_class;
     }
+    // if (index_tree1 != NULL) {
+    //   delete index_tree1;
+    // }
     data_class = NULL;
     index_class = NULL;
+    // index_tree1 = NULL;
   }
 };
 
@@ -84,16 +90,16 @@ class Spartan_share : public Handler_share {
 /** @brief
   Class definition for the storage engine
 */
-class ha_spartan : public handler {
+class ha_art : public handler {
   THR_LOCK_DATA lock;          ///< MySQL lock
-  Spartan_share *share;        ///< Shared lock info
-  Spartan_share *get_share();  ///< Get the share
+  Art_share *share;        ///< Shared lock info
+  Art_share *get_share();  ///< Get the share
 
   off_t current_position; /// current postion on the file during a file scan
 
  public:
-  ha_spartan(handlerton *hton, TABLE_SHARE *table_arg);
-  ~ha_spartan() 
+  ha_art(handlerton *hton, TABLE_SHARE *table_arg);
+  ~ha_art() 
   {
 
   }
@@ -101,9 +107,9 @@ class ha_spartan : public handler {
   /** @brief
     The name that will be used for display purposes.
    */
-  const char *table_type() const { return "SPARTAN"; }
+  const char *table_type() const { return "ART"; }
 
-  const char *index_type(uint inx) { return "Spartan_index class"; }
+  const char *index_type(uint inx) { return "Art_index class"; }
 
   const char **bas_ext() const;
 
@@ -130,7 +136,7 @@ class ha_spartan : public handler {
       an engine that can only handle statement-based logging. This is
       used in testing.
     */
-    return (HA_NO_BLOBS | HA_BINLOG_STMT_CAPABLE | HA_BINLOG_ROW_CAPABLE);;
+    return (HA_NO_BLOBS | HA_NO_AUTO_INCREMENT |HA_BINLOG_STMT_CAPABLE);;
   }
 
   /** @brief
@@ -191,7 +197,7 @@ class ha_spartan : public handler {
     There is no need to implement ..._key_... methods if your engine doesn't
     support indexes.
    */
-  uint max_supported_key_length() const { return 128; }
+  uint max_supported_key_length() const { return 254; }
 
   /** @brief
     Called in test_quick_select to determine if indexes should be used.
@@ -231,7 +237,7 @@ class ha_spartan : public handler {
   int write_row(uchar *buf) override;
 
   /** @brief
-    We implement this in ha_spartan.cc. It's not an obligatory method;
+    We implement this in ha_art.cc. It's not an obligatory method;
     skip it and and MySQL will treat it as not implemented.
   */
   int update_row(const uchar *old_data, uchar *new_data) override;
@@ -246,11 +252,12 @@ class ha_spartan : public handler {
   //int index_init(uint keynr, bool sorted) override;
   int index_read(uchar *buf, const uchar *key, uint key_len,
                  enum ha_rkey_function find_flag) override;
+
   // 函数读取一个索引文档，该文档包含整个表的所有键值以及其对应的行指针。
   virtual int index_read_idx(uchar *buf, uint index, const uchar *key,
                              uint key_len, enum ha_rkey_function find_flag);
 
-  int index_next(uchar *buf) override;
+  // int index_next(uchar *buf) override;
 
   /** @brief
     We implement this in ha_example.cc. It's not an obligatory method;
@@ -258,17 +265,17 @@ class ha_spartan : public handler {
   */
   // int index_read_map(uchar *buf, const uchar *key, key_part_map keypart_map,enum ha_rkey_function find_flag) override;
 
-  /** @brief
-    We implement this in ha_example.cc. It's not an obligatory method;
-    skip it and and MySQL will treat it as not implemented.
-  */
-  // int index_next(uchar *buf) override;
+  // /** @brief
+  //   We implement this in ha_example.cc. It's not an obligatory method;
+  //   skip it and and MySQL will treat it as not implemented.
+  // */
+  // // int index_next(uchar *buf) override;
 
-  /** @brief
-    We implement this in ha_example.cc. It's not an obligatory method;
-    skip it and and MySQL will treat it as not implemented.
-  */
-  int index_prev(uchar *buf) override;
+  // /** @brief
+  //   We implement this in ha_example.cc. It's not an obligatory method;
+  //   skip it and and MySQL will treat it as not implemented.
+  // */
+  // int index_prev(uchar *buf) override;
 
   /** @brief
     We implement this in ha_example.cc. It's not an obligatory method;
@@ -310,8 +317,10 @@ class ha_spartan : public handler {
              dd::Table *table_def) override;  ///< required
 
   uchar *get_key();
+  // uchar *get_key2();
   uchar *create_key_buffer(unsigned int length);
   int get_key_len();
+  // int get_key_len2();
 
   THR_LOCK_DATA **store_lock(
       THD *thd, THR_LOCK_DATA **to,

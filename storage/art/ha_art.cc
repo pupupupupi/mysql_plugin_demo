@@ -95,7 +95,7 @@
 #define SDE_EXT ".sde"
 #define SDI_EXT ".sdi"
 
-#include "storage/spartan/ha_spartan.h"
+#include "storage/art/ha_art.h"
 
 #include "my_dbug.h"
 #include "mysql/plugin.h"
@@ -107,60 +107,62 @@
 #include "sql/handler.h"
 
 
-// PSI_memory_key Spartan_key_memory_Transparent_file;
+// PSI_memory_key Art_key_memory_Transparent_file;
 
-// PSI_memory_key Spartan_key_memory_record_buffer;
+// PSI_memory_key Art_key_memory_record_buffer;
 
-static handler *spartan_create_handler(handlerton *hton, TABLE_SHARE *table,
+static handler *art_create_handler(handlerton *hton, TABLE_SHARE *table,
                                        bool partitioned, MEM_ROOT *mem_root);
 
-handlerton *spartan_hton;
+handlerton *art_hton;
 
 /* Interface to mysqld, to check system tables supported by SE */
-static bool spartan_is_supported_system_table(const char *db,
+static bool art_is_supported_system_table(const char *db,
                                               const char *table_name,
                                               bool is_sql_layer_system_table);
 
 #ifdef HAVE_PSI_INTERFACE
-static PSI_mutex_key ex_key_mutex_Spartan_share_mutex;
+static PSI_mutex_key ex_key_mutex_Art_share_mutex;
 
-static PSI_mutex_info all_spartan_mutexes[] = 
+static PSI_mutex_info all_art_mutexes[] = 
 {
-  { &ex_key_mutex_Spartan_share_mutex, "Spartan_share::mutex", 0 }
+  { &ex_key_mutex_Art_share_mutex, "Art_share::mutex", 0 }
 };
 
-static void init_spartan_psi_keys() 
+static void init_art_psi_keys() 
 {
-   const char* category = "spartan";
+   const char* category = "art";
    int count;
 
-   count = array_elements(all_spartan_mutexes);
-   mysql_mutex_register(category, all_spartan_mutexes, count);
+   count = array_elements(all_art_mutexes);
+   mysql_mutex_register(category, all_art_mutexes, count);
 }
 #endif
 
-Spartan_share::Spartan_share() 
+Art_share::Art_share() 
 { 
    thr_lock_init(&lock); 
-   mysql_mutex_init(ex_key_mutex_Spartan_share_mutex,&mutex, MY_MUTEX_INIT_FAST);
-   data_class = new Spartan_data();
+   mysql_mutex_init(ex_key_mutex_Art_share_mutex,&mutex, MY_MUTEX_INIT_FAST);
+   data_class = new Art_data();
 
-   index_class = new Spartan_index(4);
+   index_tree1 = new art_tree();   
+
+   index_class = new Art_index(index_tree1,255);
    //TODO index class implementation
 }
 
-static int spartan_init_func(void *p) {
+static int art_init_func(void *p) {
   DBUG_TRACE;
-  DBUG_ENTER("spartan_init_func");
+  DBUG_ENTER("art_init_func");
 #ifdef HAVE_PSI_INTERFACE
-   init_spartan_psi_keys();
+   init_art_psi_keys();
 #endif
 
-  spartan_hton = (handlerton *)p;
-  spartan_hton->state = SHOW_OPTION_YES;
-  spartan_hton->create = spartan_create_handler;
-  spartan_hton->flags = HTON_CAN_RECREATE;
-  spartan_hton->is_supported_system_table = spartan_is_supported_system_table;
+  art_hton = (handlerton *)p;
+  art_hton->state = SHOW_OPTION_YES;
+  art_hton->create = art_create_handler;
+  art_hton->flags = HTON_CAN_RECREATE;
+  art_hton->is_supported_system_table = art_is_supported_system_table;
 
   DBUG_RETURN(0);
 }
@@ -173,15 +175,15 @@ static int spartan_init_func(void *p) {
   they are needed to function.
 */
 
-Spartan_share *ha_spartan::get_share() {
-  Spartan_share *tmp_share;
+Art_share *ha_art::get_share() {
+  Art_share *tmp_share;
 
   DBUG_TRACE;
-  DBUG_ENTER("ha_spartan::get_share()");
+  DBUG_ENTER("ha_art::get_share()");
 
   lock_shared_ha_data();
-  if (!(tmp_share = static_cast<Spartan_share *>(get_ha_share_ptr()))) {
-    tmp_share = new Spartan_share;
+  if (!(tmp_share = static_cast<Art_share *>(get_ha_share_ptr()))) {
+    tmp_share = new Art_share;
     if (!tmp_share) goto err;
 
     set_ha_share_ptr(static_cast<Handler_share *>(tmp_share));
@@ -191,24 +193,24 @@ err:
   DBUG_RETURN(tmp_share);
 }
 
-static handler *spartan_create_handler(handlerton *hton, TABLE_SHARE *table,
+static handler *art_create_handler(handlerton *hton, TABLE_SHARE *table,
                                        bool, MEM_ROOT *mem_root) {
-  return new (mem_root) ha_spartan(hton, table);
+  return new (mem_root) ha_art(hton, table);
 }
 
-ha_spartan::ha_spartan(handlerton *hton, TABLE_SHARE *table_arg)
+ha_art::ha_art(handlerton *hton, TABLE_SHARE *table_arg)
     : handler(hton, table_arg) {}
 
 
-static const char *ha_spartan_exts[] = {
+static const char *ha_art_exts[] = {
   SDE_EXT,
   SDI_EXT,
   NullS
 };
 
-const char **ha_spartan::bas_ext() const 
+const char **ha_art::bas_ext() const 
 {
-  return ha_spartan_exts;
+  return ha_art_exts;
 }
 /*
   List of all system tables specific to the SE.
@@ -219,12 +221,12 @@ const char **ha_spartan::bas_ext() const
 
   This array is optional, so every SE need not implement it.
 */
-const char* ha_spartan_system_database = NULL;
-const char* spartan_system_database()
+const char* ha_art_system_database = NULL;
+const char* art_system_database()
 {
-  return ha_spartan_system_database;
+  return ha_art_system_database;
 }
-static st_handler_tablename ha_spartan_system_tables[] = {
+static st_handler_tablename ha_art_system_tables[] = {
     {(const char *)nullptr, (const char *)nullptr}};
 
 /**
@@ -238,7 +240,7 @@ static st_handler_tablename ha_spartan_system_tables[] = {
   @retval true   Given db.table_name is supported system table.
   @retval false  Given db.table_name is not a supported system table.
 */
-static bool spartan_is_supported_system_table(const char *db,
+static bool art_is_supported_system_table(const char *db,
                                               const char *table_name,
                                               bool is_sql_layer_system_table) {
   st_handler_tablename *systab;
@@ -247,7 +249,7 @@ static bool spartan_is_supported_system_table(const char *db,
   if (is_sql_layer_system_table) return false;
 
   // Check if this is SE layer system tables
-  systab = ha_spartan_system_tables;
+  systab = ha_art_system_tables;
   while (systab && systab->db) {
     if (systab->db == db && strcmp(systab->tablename, table_name) == 0)
       return true;
@@ -273,9 +275,9 @@ static bool spartan_is_supported_system_table(const char *db,
   handler::ha_open() in handler.cc
 */
 
-int ha_spartan::open(const char *name, int mode, uint test_if_lock, const dd::Table *) {
+int ha_art::open(const char *name, int mode, uint test_if_lock, const dd::Table *) {
   DBUG_TRACE;
-  DBUG_ENTER("ha_spartan::open");
+  DBUG_ENTER("ha_art::open");
 
   char name_buff[FN_REFLEN];
 
@@ -290,7 +292,7 @@ int ha_spartan::open(const char *name, int mode, uint test_if_lock, const dd::Ta
   // fn_format(name_buff, name, "", SDI_EXT, MY_REPLACE_EXT | MY_UNPACK_FILENAME);
   fn_format(name_buff, name, "", SDI_EXT, MY_UNPACK_FILENAME | MY_APPEND_EXT);
   share->index_class->open_index(name_buff);
-  share->index_class->load_index();
+  // share->index_class->load_index();
   // 用current_positio初始化位置
   current_position = 0;
   thr_lock_data_init(&share->lock, &lock, nullptr);
@@ -313,20 +315,22 @@ int ha_spartan::open(const char *name, int mode, uint test_if_lock, const dd::Ta
   sql_base.cc, sql_select.cc and table.cc
 */
 
-int ha_spartan::close(void) {
+int ha_art::close(void) {
   DBUG_TRACE;
-  DBUG_ENTER("ha_spartan::close");
+  DBUG_ENTER("ha_art::close");
   share->data_class->close_table();
-  share->index_class->save_index();
-  share->index_class->destroy_index();
-  share->index_class->close_index();
+  // share->index_class->save_index();
+
+  // share->index_class->destroy_index(index_tree);
+
+  // share->index_class->close_index();
   //TODO index
   DBUG_RETURN(0);
 }
 
-uchar *ha_spartan::get_key() {
+uchar *ha_art::get_key() {
   uchar *key = nullptr;
-  DBUG_ENTER("ha_spartan::get_key");  
+  DBUG_ENTER("ha_art::get_key");  
   /*
   For each field in the table, check to see if it is the key
   by checking the key_start variable. (1 = is a key).
@@ -340,17 +344,37 @@ uchar *ha_spartan::get_key() {
       */
       key = (uchar *)my_malloc(PSI_NOT_INSTRUMENTED,((*field)->field_length),MYF(MY_ZEROFILL | MY_WME));
       memcpy(key, (*field)->field_ptr(), (*field)->key_length());
+      DBUG_RETURN(key);
     }
   }
   DBUG_RETURN(key);
 }
 
+// uchar *ha_art::get_key2() {
+//   uchar *key2 = nullptr;
+//   DBUG_ENTER("ha_art::get_key");
+
+//   int keyCount = 0; // 计数器，记录找到的关键字段个数
+  
+//   for (Field **field = table->field ; *field ; field++) {
+//     if ((*field)->key_start.to_ulonglong() == 1) {
+//       if (keyCount == 1) {
+//         key2 = (uchar *)my_malloc(PSI_NOT_INSTRUMENTED, ((*field)->field_length), MYF(MY_ZEROFILL | MY_WME));
+//         memcpy(key2, (*field)->field_ptr(), (*field)->key_length());
+//       } else {
+//         keyCount++; // 找到一个关键字段，增加计数器
+//       }
+//     }
+//   }
+
+//   DBUG_RETURN(key2);
+// }
 
 
-int ha_spartan::get_key_len()
+int ha_art::get_key_len()
 {
   int length = 0;
-  DBUG_ENTER("ha_spartan::get_key");
+  DBUG_ENTER("ha_art::get_key");
   /*
   For each field in the table, check to see if it is the key
   by checking the key_start variable. (1 = is a key).
@@ -362,9 +386,39 @@ int ha_spartan::get_key_len()
     Copy field length to key length
     */
     length = (*field)->key_length();
+
+    DBUG_RETURN(length);
   }
  DBUG_RETURN(length);
 }
+
+
+
+// int ha_art::get_key_len2()
+// {
+//   int length2 = 0;
+//   DBUG_ENTER("ha_art::get_key_len");
+
+//   int lenCount = 0; // 计数器，记录找到的关键字段个数
+  
+//   for (Field **field = table->field; *field ; field++)
+//   {
+//     if ((*field)->key_start.to_ulonglong() == 1)
+//     {
+//       if (lenCount == 1)
+//       {
+//         length2 = (*field)->key_length();
+//         break; // 找到第二个关键字段后，跳出循环
+//       }
+//       else
+//       {
+//         lenCount++; // 找到一个关键字段，增加计数器
+//       }
+//     }
+//   }
+
+//   DBUG_RETURN(length2);
+// }
 
 /**
   @brief
@@ -396,16 +450,19 @@ int ha_spartan::get_key_len()
   sql_insert.cc, sql_select.cc, sql_table.cc, sql_udf.cc and sql_update.cc
 */
 
-int ha_spartan::write_row(uchar *buf) {
+int ha_art::write_row(uchar *buf) {
   DBUG_TRACE;
   long long pos;
-  SDE_INDEX ndx;
-  DBUG_ENTER("ha_spartan::write_row");
+  // art_tree *index_tree;
+  // art_tree *index_tree = (art_tree*)malloc(sizeof(art_tree));
+  // art_leaf *leaf;
+  //art_leaf *leaf = (art_leaf*)malloc(sizeof(art_leaf));
+  DBUG_ENTER("ha_art::write_row");
 
   ha_statistic_increment(&System_status_var::ha_write_count);
   // TODO index
-  ndx.length = get_key_len();
-  memcpy(ndx.key, get_key(), get_key_len());
+  //leaf->key_len = get_key_len();
+  //memcpy(leaf->key, get_key(), get_key_len());
 
   
   mysql_mutex_lock(&share->mutex);
@@ -414,10 +471,13 @@ int ha_spartan::write_row(uchar *buf) {
   //   // 索引地址
   // pos = share->index_class->write_row(&ndx);
   // 数据地址
-  ndx.pos = pos;
+  //leaf->pos = pos;
 
-  if ((ndx.key != 0) && (ndx.length != 0))
-    share->index_class->insert_key(&ndx, false);
+  if ((get_key() != 0) && (get_key_len() != 0))
+    share->index_class->insert_key(share->index_tree1, get_key(), pos, get_key_len());
+
+  // if ((get_key2() != 0) && (get_key_len2() != 0))
+  //   share->index_class->insert_key(share->index_tree1, get_key2(), pos, get_key_len2());
   
   mysql_mutex_unlock(&share->mutex);
   DBUG_RETURN(0);
@@ -446,18 +506,28 @@ int ha_spartan::write_row(uchar *buf) {
   @see
   sql_select.cc, sql_acl.cc, sql_update.cc and sql_insert.cc
 */
-int ha_spartan::update_row(const uchar *old_data, uchar *new_data) {
+int ha_art::update_row(const uchar *old_data, uchar *new_data) {
   DBUG_TRACE;
-  DBUG_ENTER("ha_spartan::update_row");
+  DBUG_ENTER("ha_art::update_row");
   mysql_mutex_lock(&(share->mutex));
-  share->data_class->update_row((uchar *)old_data, new_data, table->s->rec_buff_length,current_position - share->data_class->row_size(table->s->rec_buff_length));
+
+  long long pos_current = current_position - share->data_class->row_size(table->s->rec_buff_length);
+
+  share->data_class->update_row((uchar *)old_data, new_data, table->s->rec_buff_length,pos_current);
   
   if (get_key() != 0)
   {
-    share->index_class->update_key(get_key(), current_position - share->data_class->row_size(table->s->rec_buff_length),get_key_len());
-    share->index_class->save_index();
-    share->index_class->load_index();
+    share->index_class->update_key(share->index_tree1 ,get_key(), get_key_len(), pos_current);
+    // share->index_class->save_index();
+    // share->index_class->load_index();
   }
+
+  // if (get_key2() != 0)
+  // {
+  //   share->index_class->update_key(share->index_tree1 ,get_key2(), get_key_len2(), pos_current);
+  //   // share->index_class->save_index();
+  //   // share->index_class->load_index();
+  // }
   
   mysql_mutex_unlock(&share->mutex);
   DBUG_RETURN(0);
@@ -483,11 +553,10 @@ int ha_spartan::update_row(const uchar *old_data, uchar *new_data) {
   sql_acl.cc, sql_udf.cc, sql_delete.cc, sql_insert.cc and sql_select.cc
 */
 
-int ha_spartan::delete_row(const uchar *buf) {
+int ha_art::delete_row(const uchar *buf) {
   DBUG_TRACE;
   long long pos;
-  DBUG_ENTER("ha_spartan::delete_row");
-
+  DBUG_ENTER("ha_art::delete_row");
 
   if (current_position > 0)
     pos = current_position - share->data_class->row_size(table->s->rec_buff_length);
@@ -498,7 +567,11 @@ int ha_spartan::delete_row(const uchar *buf) {
   share->data_class->delete_row((uchar *)buf, table->s->rec_buff_length, pos);
 
   if (get_key() != 0)
-   share->index_class->delete_key(get_key(), pos, get_key_len());
+    share->index_class->delete_key(share->index_tree1 ,get_key() ,get_key_len());
+  
+  // if (get_key2() != 0)
+  //   share->index_class->delete_key(share->index_tree1 ,get_key2() ,get_key_len2());
+  
   mysql_mutex_unlock(&share->mutex);
 
   DBUG_RETURN(0);
@@ -511,20 +584,20 @@ int ha_spartan::delete_row(const uchar *buf) {
   index.
 */
 
-// int ha_spartan::index_read_map(uchar *buf, const uchar *key, key_part_map keypart_map,enum ha_rkey_function find_flag) {
+// int ha_art::index_read_map(uchar *buf, const uchar *key, key_part_map keypart_map,enum ha_rkey_function find_flag) {
 //   DBUG_TRACE;
-//   DBUG_ENTER("ha_spartan::index_read_map");
+//   DBUG_ENTER("ha_art::index_read_map");
 
 //   // Find the key in the index based on the provided key value and find_flag
-//   SDE_INDEX* result = share->index_class->seek_index(const_cast<uchar*>(key), get_key_len());
+//   art_leaf* art_leaf2 = share->index_class->seek_index(share->index_tree1, (uchar*)key, get_key_len());
 
-//   if (result == nullptr)
+//   if (art_leaf2 == NULL)
 //   {
 //     DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
 //   }
 
 //   // Get the position of the found key in the data file
-//   long long pos = share->index_class->get_index_pos((uchar *)key, get_key_len());
+//   long long pos = share->index_class->get_index_pos(share->index_tree1 ,(uchar *)key, get_key_len());
 
 //   if (pos == -1)
 //   {
@@ -542,25 +615,25 @@ int ha_spartan::delete_row(const uchar *buf) {
   Used to read forward through the index.
 */
 
-int ha_spartan::index_next(uchar *buf) {
-  DBUG_TRACE;
+// int ha_art::index_next(uchar *buf) {
+//   DBUG_TRACE;
 
-  uchar *key = nullptr;
-  long long pos;
+//   uchar *key = nullptr;
+//   long long pos;
 
-  DBUG_ENTER("ha_spartan::index_next");
-  key = share->index_class->get_next_key();
-  if (key == 0)
-    DBUG_RETURN(HA_ERR_END_OF_FILE);
-  pos = share->index_class->get_index_pos((uchar *)key, get_key_len());
-  share->index_class->seek_index(key, get_key_len());
-  share->index_class->get_next_key();
-  if (pos == -1)
-    DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
-  share->data_class->read_row(buf, table->s->rec_buff_length, pos);
+//   DBUG_ENTER("ha_art::index_next");
+//   key = share->index_class->get_next_key();
+//   if (key == 0)
+//     DBUG_RETURN(HA_ERR_END_OF_FILE);
+//   pos = share->index_class->get_index_pos((uchar *)key, get_key_len());
+//   share->index_class->seek_index(key, get_key_len());
+//   share->index_class->get_next_key();
+//   if (pos == -1)
+//     DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
+//   share->data_class->read_row(buf, table->s->rec_buff_length, pos);
 
-  DBUG_RETURN(0);
-}
+//   DBUG_RETURN(0);
+// }
 
 /**
   @brief
@@ -568,21 +641,21 @@ int ha_spartan::index_next(uchar *buf) {
 */
 
 
-int ha_spartan::index_prev(uchar *buf) {
-  uchar *key = nullptr;
-  long long pos;
-  DBUG_ENTER("ha_spartan::index_prev");
-  key = share->index_class->get_prev_key();
-  if (key == 0)
-    DBUG_RETURN(HA_ERR_END_OF_FILE);
-  pos = share->index_class->get_index_pos((uchar *)key, get_key_len());
-  share->index_class->seek_index(key, get_key_len());
-  share->index_class->get_prev_key();
-  if (pos == -1)
-    DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
-  share->data_class->read_row(buf, table->s->rec_buff_length, pos);
-  DBUG_RETURN(0);
-}
+// int ha_art::index_prev(uchar *buf) {
+//   uchar *key = nullptr;
+//   long long pos;
+//   DBUG_ENTER("ha_art::index_prev");
+//   key = share->index_class->get_prev_key();
+//   if (key == 0)
+//     DBUG_RETURN(HA_ERR_END_OF_FILE);
+//   pos = share->index_class->get_index_pos((uchar *)key, get_key_len());
+//   share->index_class->seek_index(key, get_key_len());
+//   share->index_class->get_prev_key();
+//   if (pos == -1)
+//     DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
+//   share->data_class->read_row(buf, table->s->rec_buff_length, pos);
+//   DBUG_RETURN(0);
+// }
 
 /**
   @brief
@@ -596,10 +669,10 @@ int ha_spartan::index_prev(uchar *buf) {
 */
 
 
-int ha_spartan::index_first(uchar *buf) {
+int ha_art::index_first(uchar *buf) {
   uchar *key = nullptr;
   DBUG_ENTER("ha_example::index_first");
-  key = share->index_class->get_first_key();
+  key = share->index_class->get_first_key(share->index_tree1);
   if (key == 0)
     DBUG_RETURN(HA_ERR_END_OF_FILE);
   memcpy(buf, key, get_key_len());
@@ -618,10 +691,10 @@ int ha_spartan::index_first(uchar *buf) {
 */
 
 
-int ha_spartan::index_last(uchar *buf) {
+int ha_art::index_last(uchar *buf) {
   uchar *key = nullptr;
   DBUG_ENTER("ha_example::index_last");
-  key = share->index_class->get_last_key();
+  key = share->index_class->get_last_key(share->index_tree1);
   if (key == 0)
     DBUG_RETURN(HA_ERR_END_OF_FILE);
   memcpy(buf, key, get_key_len());
@@ -642,9 +715,9 @@ int ha_spartan::index_last(uchar *buf) {
   filesort.cc, records.cc, sql_handler.cc, sql_select.cc, sql_table.cc and
   sql_update.cc
 */
-int ha_spartan::rnd_init(bool scan)
+int ha_art::rnd_init(bool scan)
 {
-  DBUG_ENTER("ha_spartan::rnd_init");
+  DBUG_ENTER("ha_art::rnd_init");
 
   current_position = 0;
   stats.records = 0;
@@ -653,9 +726,9 @@ int ha_spartan::rnd_init(bool scan)
   DBUG_RETURN(0);
 }
 
-int ha_spartan::rnd_end()
+int ha_art::rnd_end()
 {
-  DBUG_ENTER("ha_spartan::rnd_end");
+  DBUG_ENTER("ha_art::rnd_end");
   DBUG_RETURN(0);
 }
 
@@ -674,10 +747,10 @@ int ha_spartan::rnd_end()
   filesort.cc, records.cc, sql_handler.cc, sql_select.cc, sql_table.cc and
   sql_update.cc
 */
-int ha_spartan::rnd_next(uchar *buf)
+int ha_art::rnd_next(uchar *buf)
 {
     int rc;
-    DBUG_ENTER("ha_spartan::rnd_next");
+    DBUG_ENTER("ha_art::rnd_next");
     ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
   
     rc = share->data_class->read_row(buf, table->s->rec_buff_length, current_position);
@@ -712,9 +785,9 @@ int ha_spartan::rnd_next(uchar *buf)
   @see
   filesort.cc, sql_select.cc, sql_delete.cc and sql_update.cc
 */
-void ha_spartan::position(const uchar *record)
+void ha_art::position(const uchar *record)
 {
-  DBUG_ENTER("ha_spartan::position");
+  DBUG_ENTER("ha_art::position");
   my_store_ptr(ref, ref_length, current_position);
   DBUG_VOID_RETURN;
 }
@@ -733,10 +806,10 @@ void ha_spartan::position(const uchar *record)
   @see
   filesort.cc, records.cc, sql_insert.cc, sql_select.cc and sql_update.cc
 */
-int ha_spartan::rnd_pos(uchar *buf, uchar *pos)
+int ha_art::rnd_pos(uchar *buf, uchar *pos)
 {
     int rc;
-    DBUG_ENTER("ha_spartan::rnd_pos");
+    DBUG_ENTER("ha_art::rnd_pos");
     ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
     current_position = (off_t)my_get_ptr(pos, ref_length);
     rc = share->data_class->read_row(buf, current_position, -1);
@@ -781,9 +854,9 @@ int ha_spartan::rnd_pos(uchar *buf, uchar *pos)
   sql_select.cc, sql_select.cc, sql_show.cc, sql_show.cc, sql_show.cc,
   sql_show.cc, sql_table.cc, sql_union.cc and sql_update.cc
 */
-int ha_spartan::info(uint flag)
+int ha_art::info(uint flag)
 {
-  DBUG_ENTER("ha_spartan::info");
+  DBUG_ENTER("ha_art::info");
   if (stats.records < 2)
       stats.records = 2;
   DBUG_RETURN(0);
@@ -798,9 +871,9 @@ int ha_spartan::info(uint flag)
     @see
   ha_innodb.cc
 */
-int ha_spartan::extra(enum ha_extra_function operation)
+int ha_art::extra(enum ha_extra_function operation)
 {
-  DBUG_ENTER("ha_spartan::extra");
+  DBUG_ENTER("ha_art::extra");
   DBUG_RETURN(0);
 }
 
@@ -824,24 +897,26 @@ int ha_spartan::extra(enum ha_extra_function operation)
   JOIN::reinit() in sql_select.cc and
   st_query_block_query_expression::exec() in sql_union.cc.
 */
-int ha_spartan::delete_all_rows()
+int ha_art::delete_all_rows()
 {
-  DBUG_ENTER("ha_spartan::delete_all_rows");
+  DBUG_ENTER("ha_art::delete_all_rows");
 
   mysql_mutex_lock(&share->mutex);
 
   share->data_class->trunc_table();
-  share->index_class->destroy_index();
-  share->index_class->trunc_index();
+
+  share->index_class->destroy_index(share->index_tree1);
+
+  // share->index_class->trunc_index();
 
   mysql_mutex_unlock(&share->mutex);
 
   DBUG_RETURN(0);
 }
 
-int ha_spartan::truncate()
+int ha_art::truncate()
 {
-  DBUG_ENTER("ha_spartan::truncate");
+  DBUG_ENTER("ha_art::truncate");
   DBUG_RETURN(HA_ERR_WRONG_COMMAND);
 }
 
@@ -862,9 +937,9 @@ int ha_spartan::truncate()
   the section "locking functions for mysql" in lock.cc;
   copy_data_between_tables() in sql_table.cc.
 */
-int ha_spartan::external_lock(THD *thd, int lock_type)
+int ha_art::external_lock(THD *thd, int lock_type)
 {
-  DBUG_ENTER("ha_spartan::external_lock");
+  DBUG_ENTER("ha_art::external_lock");
   DBUG_RETURN(0);
 }
 
@@ -905,7 +980,7 @@ int ha_spartan::external_lock(THD *thd, int lock_type)
   @see
   get_lock_data() in lock.cc
 */
-THR_LOCK_DATA **ha_spartan::store_lock(THD *thd,
+THR_LOCK_DATA **ha_art::store_lock(THD *thd,
                                        THR_LOCK_DATA **to,
                                        enum thr_lock_type lock_type)
 {
@@ -935,9 +1010,9 @@ THR_LOCK_DATA **ha_spartan::store_lock(THD *thd,
   delete_table and ha_create_table() in handler.cc
 */
 
-int ha_spartan::delete_table(const char *name, const dd::Table *table_def)
+int ha_art::delete_table(const char *name, const dd::Table *table_def)
 {
-    DBUG_ENTER("ha_spartan::delete_table");
+    DBUG_ENTER("ha_art::delete_table");
 
     char data_file[FN_REFLEN];
     char index_file[FN_REFLEN];
@@ -976,10 +1051,10 @@ int ha_spartan::delete_table(const char *name, const dd::Table *table_def)
   @see
   mysql_rename_table() in sql_table.cc
 */
-int ha_spartan::rename_table(const char * from, const char * to,  const dd::Table *from_table_def,
+int ha_art::rename_table(const char * from, const char * to,  const dd::Table *from_table_def,
                    dd::Table *to_table_def)
 {
-    DBUG_ENTER("ha_spartan::rename_table");
+    DBUG_ENTER("ha_art::rename_table");
 
     char data_from[FN_REFLEN];
     char data_to[FN_REFLEN];
@@ -1010,31 +1085,33 @@ int ha_spartan::rename_table(const char * from, const char * to,  const dd::Tabl
 }
 
 
-int ha_spartan::index_read(uchar *buf, const uchar *key, uint key_len, enum ha_rkey_function find_flag) {
+int ha_art::index_read(uchar *buf, const uchar *key, uint key_len, enum ha_rkey_function find_flag) {
   long long pos;
 
   DBUG_ENTER("ha_archive::index_read");
-  if (key == nullptr)
-    pos = share->index_class->get_first_pos();
+
+  if (key == NULL)
+    pos = share->index_class->get_first_pos(share->index_tree1);
   else
-    pos = share->index_class->get_index_pos((uchar *)key, key_len);
+    pos = share->index_class->get_index_pos(share->index_tree1 ,(uchar *)key, key_len);
   if (pos == -1)
     DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
   current_position = pos + share->data_class->row_size(table->s->rec_buff_length);
   share->data_class->read_row(buf, table->s->rec_buff_length, pos);
-  share->index_class->get_next_key();
+  // share->index_class->get_next_key();
   DBUG_RETURN(0);
 
 }
 
-int ha_spartan::index_read_idx(uchar *buf, uint index, const uchar *key,
+int ha_art::index_read_idx(uchar *buf, uint index, const uchar *key,
                                uint key_len, enum ha_rkey_function) {
   long long pos;
-  DBUG_ENTER("ha_spartan::index_read_idx");
-  pos = share->index_class->get_index_pos((uchar *)key, key_len);
+  DBUG_ENTER("ha_art::index_read_idx");
+  pos = share->index_class->get_index_pos(share->index_tree1 , (uchar *)key, key_len);
   if (pos == -1)
     DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
   share->data_class->read_row(buf, table->s->rec_buff_length, pos);
+
   DBUG_RETURN(0);
 }
 
@@ -1051,10 +1128,10 @@ int ha_spartan::index_read_idx(uchar *buf, uint index, const uchar *key,
   @see
   check_quick_keys() in opt_range.cc
 */
-ha_rows ha_spartan::records_in_range(uint inx, key_range *min_key,
+ha_rows ha_art::records_in_range(uint inx, key_range *min_key,
                                      key_range *max_key)
 {
-  DBUG_ENTER("ha_spartan::records_in_range");
+  DBUG_ENTER("ha_art::records_in_range");
   DBUG_RETURN(10);                         // low number to force index usage
 }
 
@@ -1083,10 +1160,10 @@ static MYSQL_THDVAR_UINT(create_count_thdvar, 0, nullptr, nullptr, nullptr, 0,
   ha_create_table() in handle.cc
 */
 
-int ha_spartan::create(const char *name, TABLE *table_arg,
+int ha_art::create(const char *name, TABLE *table_arg,
                        HA_CREATE_INFO *create_info, dd::Table *)
 {
-    DBUG_ENTER("ha_spartan::create");
+    DBUG_ENTER("ha_art::create");
     char name_buff[FN_REFLEN];
 
     if (!(share = get_share()))
@@ -1107,18 +1184,18 @@ int ha_spartan::create(const char *name, TABLE *table_arg,
     //TODO index
     // fn_format(name_buff, name, "", SDI_EXT, MY_REPLACE_EXT | MY_UNPACK_FILENAME);
     fn_format(name_buff, name, "", SDI_EXT, MY_UNPACK_FILENAME | MY_APPEND_EXT);
-    if (share->index_class->create_index(name_buff,128))
+    if (share->index_class->create_index(name_buff,255))
     {
         DBUG_PRINT("info", ("hot here 1"));
         DBUG_RETURN(-1);
     }
-    share->index_class->close_index();
+    // share->index_class->close_index();
     share->data_class->close_table();
 
     DBUG_RETURN(0);
 }
 
-struct st_mysql_storage_engine spartan_storage_engine = {
+struct st_mysql_storage_engine art_storage_engine = {
     MYSQL_HANDLERTON_INTERFACE_VERSION};
 
 static ulong srv_enum_var = 0;
@@ -1128,7 +1205,7 @@ static int srv_signed_int_var = 0;
 static long srv_signed_long_var = 0;
 static longlong srv_signed_longlong_var = 0;
 
-const char *enum_var_names1[] = {"spartan_test1", "spartan_test2", NullS};
+const char *enum_var_names1[] = {"art_test1", "art_test2", NullS};
 
 TYPELIB enum_var_typelib1 = {array_elements(enum_var_names1) - 1,
                             "enum_var_typelib1", enum_var_names1, nullptr};
@@ -1178,7 +1255,7 @@ static MYSQL_THDVAR_LONGLONG(signed_longlong_thdvar, PLUGIN_VAR_RQCMDARG,
                              "LLONG_MIN..LLONG_MAX", nullptr, nullptr, -10,
                              LLONG_MIN, LLONG_MAX, 0);
 
-static SYS_VAR *spartan_system_variables[] = {
+static SYS_VAR *art_system_variables[] = {
     MYSQL_SYSVAR(enum_var),
     MYSQL_SYSVAR(ulong_var),
     MYSQL_SYSVAR(double_var),
@@ -1194,7 +1271,7 @@ static SYS_VAR *spartan_system_variables[] = {
     nullptr};
 
 // this is an example of SHOW_FUNC
-static int show_func_spartan(MYSQL_THD, SHOW_VAR *var, char *buf) {
+static int show_func_art(MYSQL_THD, SHOW_VAR *var, char *buf) {
   var->type = SHOW_CHAR;
   var->value = buf;  // it's of SHOW_VAR_FUNC_BUFF_SIZE bytes
   snprintf(buf, SHOW_VAR_FUNC_BUFF_SIZE,
@@ -1206,7 +1283,7 @@ static int show_func_spartan(MYSQL_THD, SHOW_VAR *var, char *buf) {
   return 0;
 }
 
-struct spartan_vars_t {
+struct art_vars_t {
   ulong var1;
   double var2;
   char var3[64];
@@ -1215,45 +1292,45 @@ struct spartan_vars_t {
   ulong var6;
 };
 
-spartan_vars_t spartan_vars = {100, 20.01, "three hundred", true, false, 8250};
+art_vars_t art_vars = {100, 20.01, "three hundred", true, false, 8250};
 
-static SHOW_VAR show_status_spartan[] = {
-    {"var1", (char *)&spartan_vars.var1, SHOW_LONG, SHOW_SCOPE_GLOBAL},
-    {"var2", (char *)&spartan_vars.var2, SHOW_DOUBLE, SHOW_SCOPE_GLOBAL},
+static SHOW_VAR show_status_art[] = {
+    {"var1", (char *)&art_vars.var1, SHOW_LONG, SHOW_SCOPE_GLOBAL},
+    {"var2", (char *)&art_vars.var2, SHOW_DOUBLE, SHOW_SCOPE_GLOBAL},
     {nullptr, nullptr, SHOW_UNDEF,
      SHOW_SCOPE_UNDEF}  // null terminator required
 };
 
-static SHOW_VAR show_array_spartan[] = {
-    {"array", (char *)show_status_spartan, SHOW_ARRAY, SHOW_SCOPE_GLOBAL},
-    {"var3", (char *)&spartan_vars.var3, SHOW_CHAR, SHOW_SCOPE_GLOBAL},
-    {"var4", (char *)&spartan_vars.var4, SHOW_BOOL, SHOW_SCOPE_GLOBAL},
+static SHOW_VAR show_array_art[] = {
+    {"array", (char *)show_status_art, SHOW_ARRAY, SHOW_SCOPE_GLOBAL},
+    {"var3", (char *)&art_vars.var3, SHOW_CHAR, SHOW_SCOPE_GLOBAL},
+    {"var4", (char *)&art_vars.var4, SHOW_BOOL, SHOW_SCOPE_GLOBAL},
     {nullptr, nullptr, SHOW_UNDEF, SHOW_SCOPE_UNDEF}};
 
 static SHOW_VAR func_status[] = {
-    {"spartan_func", (char *)show_func_spartan, SHOW_FUNC,
+    {"art_func", (char *)show_func_art, SHOW_FUNC,
      SHOW_SCOPE_GLOBAL},
-    {"spartan_status_var5", (char *)&spartan_vars.var5, SHOW_BOOL,
+    {"art_status_var5", (char *)&art_vars.var5, SHOW_BOOL,
      SHOW_SCOPE_GLOBAL},
-    {"spartan_status_var6", (char *)&spartan_vars.var6, SHOW_LONG,
+    {"art_status_var6", (char *)&art_vars.var6, SHOW_LONG,
      SHOW_SCOPE_GLOBAL},
-    {"spartan_status", (char *)show_array_spartan, SHOW_ARRAY,
+    {"art_status", (char *)show_array_art, SHOW_ARRAY,
      SHOW_SCOPE_GLOBAL},
     {nullptr, nullptr, SHOW_UNDEF, SHOW_SCOPE_UNDEF}};
 
-mysql_declare_plugin(spartan){
+mysql_declare_plugin(art){
     MYSQL_STORAGE_ENGINE_PLUGIN,
-    &spartan_storage_engine,
-    "SPARTAN",
+    &art_storage_engine,
+    "ART",
     PLUGIN_AUTHOR_ORACLE,
-    "spartan storage engine",
+    "art storage engine",
     PLUGIN_LICENSE_GPL,
-    spartan_init_func, /* Plugin Init */
+    art_init_func, /* Plugin Init */
     nullptr,           /* Plugin check uninstall */
     nullptr,           /* Plugin Deinit */
     0x0001 /* 0.1 */,
     func_status,              /* status variables */
-    spartan_system_variables, /* system variables */
+    art_system_variables, /* system variables */
     nullptr,                  /* config options */
     0,                        /* flags */
 } mysql_declare_plugin_end;
