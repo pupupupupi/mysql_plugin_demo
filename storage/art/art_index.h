@@ -205,18 +205,20 @@ private:
   int max_key_len;
   int block_size;
   
-  // Simplified iterator using linear leaf collection
+  // Simplified iterator using linear leaf collection with caching
   struct simple_iterator {
     art_leaf **leaves;          // Array of all leaves (sorted)
     int total_leaves;           // Total number of leaves
     int current_index;          // Current position in array
     int capacity;               // Array capacity
     bool valid;                 // Iterator validity
+    unsigned long cache_version; // Version for cache invalidation
   };
   
   // Iterator state
   const art_tree *iter_tree;           // Tree being iterated
   simple_iterator iterator;            // Simple linear iterator
+  unsigned long tree_version;          // Global version counter for cache invalidation
   
   // Helper methods for leaf collection
   void collect_all_leaves(art_node *node, art_leaf ***leaves_ptr, int *count, int *capacity);

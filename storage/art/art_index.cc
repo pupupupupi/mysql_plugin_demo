@@ -44,13 +44,15 @@ Art_index::Art_index(art_tree *t, int keylen)
   max_key_len = keylen;
   index_file = -1;
   
-  // Initialize simple iterator state
+  // Initialize simple iterator state with optimization
   iter_tree = nullptr;
   iterator.leaves = nullptr;
   iterator.total_leaves = 0;
   iterator.current_index = -1;
   iterator.capacity = 0;
   iterator.valid = false;
+  iterator.cache_version = 0;
+  tree_version = 1; // Start with version 1
   
   DBUG_VOID_RETURN;
 }
@@ -61,13 +63,15 @@ Art_index::Art_index()
   max_key_len = 0;
   index_file = -1;
   
-  // Initialize simple iterator state
+  // Initialize simple iterator state with optimization
   iter_tree = nullptr;
   iterator.leaves = nullptr;
   iterator.total_leaves = 0;
   iterator.current_index = -1;
   iterator.capacity = 0;
   iterator.valid = false;
+  iterator.cache_version = 0;
+  tree_version = 1; // Start with version 1
   
   DBUG_VOID_RETURN;
 }
@@ -701,7 +705,10 @@ long long Art_index::insert_key(art_tree *t, const uchar *key, long long pos , i
   int old_val = 0;
   int key_len = length;
   long long old = recursive_insert(t->root, &t->root, key, key_len, pos, 0, &old_val, 0);
-  if (!old_val) t->size++;
+  if (!old_val) {
+    t->size++;
+    tree_version++; // Invalidate cache
+  }
   return old;
 }
 
@@ -863,6 +870,7 @@ long long  Art_index::delete_key(art_tree *t, const uchar *key, int key_len){
   art_leaf *l = recursive_delete(t->root, &t->root, key, key_len, 0);
   if (l) {
     t->size--;
+    tree_version++; // Invalidate cache
     long long old = l->pos;
     free(l);
     return old;
@@ -979,6 +987,7 @@ long long Art_index::update_key(art_tree *t, uchar *key, int key_len, long long 
     if (l) {
         long long old = l->pos;
         l->pos = pos;
+        // Note: position update doesn't change tree structure, so no version increment needed
         // key = (uchar *)my_malloc(PSI_NOT_INSTRUMENTED,key_len, MYF(MY_ZEROFILL | MY_WME));
         // memcpy(l->key, key, key_len);
         // l->key_len = key_len;
@@ -987,7 +996,7 @@ long long Art_index::update_key(art_tree *t, uchar *key, int key_len, long long 
 
     // 如果叶节点不存在，利用现有的insert_key函数进行插入操作
     else {
-        return insert_key(t, key, pos, key_len);
+        return insert_key(t, key, pos, key_len); // This will increment version
     }
 }
 
@@ -996,6 +1005,7 @@ int Art_index::destroy_index(art_tree *t) {
   destroy_node(t->root);
   t->root = NULL;
   t->size = 0;
+  tree_version++; // Invalidate cache
   DBUG_RETURN(0);
 }
 
@@ -1053,6 +1063,9 @@ int Art_index::load_index(art_tree *t) {
         t->root = NULL;
         t->size = 0;
     }
+    
+    // Invalidate iterator cache since we're rebuilding the tree
+    tree_version++;
     
     // 移动到文件开头
     my_seek(index_file, 0, MY_SEEK_SET, MYF(0));
@@ -1126,9 +1139,17 @@ int Art_index::close_index() {
  * Simple iterator implementation using leaf collection and sorting
  */
 
-// Helper: Resize leaf array when needed
+// Helper: Resize leaf array when needed (optimized allocation strategy)
 void Art_index::resize_leaf_array(art_leaf ***leaves_ptr, int *capacity) {
-    int new_capacity = (*capacity == 0) ? 1000 : (*capacity * 2);
+    int new_capacity;
+    if (*capacity == 0) {
+        new_capacity = 10000; // Start with larger initial capacity
+    } else if (*capacity < 100000) {
+        new_capacity = *capacity * 2; // Double for smaller arrays
+    } else {
+        new_capacity = *capacity + 50000; // Linear growth for large arrays
+    }
+    
     art_leaf **new_leaves = (art_leaf**)realloc(*leaves_ptr, new_capacity * sizeof(art_leaf*));
     if (new_leaves) {
         *leaves_ptr = new_leaves;
@@ -1136,7 +1157,7 @@ void Art_index::resize_leaf_array(art_leaf ***leaves_ptr, int *capacity) {
     }
 }
 
-// Helper: Collect all leaves from tree (recursive)
+// Helper: Collect all leaves from tree (recursive, optimized)
 void Art_index::collect_all_leaves(art_node *node, art_leaf ***leaves_ptr, int *count, int *capacity) {
     if (!node || !leaves_ptr || !count || !capacity) return;
     
@@ -1144,8 +1165,8 @@ void Art_index::collect_all_leaves(art_node *node, art_leaf ***leaves_ptr, int *
     if (IS_LEAF(node)) {
         art_leaf *leaf = LEAF_RAW(node);
         if (leaf && leaf->key_len > 0) {
-            // Resize array if needed
-            if (*count >= *capacity) {
+            // Resize array if needed (with some headroom to reduce reallocations)
+            if (*count >= *capacity - 100) { // Resize earlier to avoid frequent reallocations
                 resize_leaf_array(leaves_ptr, capacity);
                 if (!*leaves_ptr) return; // Allocation failed
             }
@@ -1227,15 +1248,26 @@ void Art_index::cleanup_iterator() {
     iterator.current_index = -1;
     iterator.capacity = 0;
     iterator.valid = false;
+    iterator.cache_version = 0; // Reset cache version
 }
 
-// Initialize iterator
+// Initialize iterator with caching
 int Art_index::init_iterator(const art_tree *t) {
     if (!t || !t->root) {
         return -1;
     }
     
-    // Clean up any existing iterator
+    // Check if we can reuse cached iterator
+    if (iterator.valid && 
+        iter_tree == t && 
+        iterator.cache_version == tree_version &&
+        iterator.leaves != nullptr &&
+        iterator.total_leaves > 0) {
+        // Cache hit! Reuse existing sorted iterator
+        return 0;
+    }
+    
+    // Cache miss or invalidated - rebuild iterator
     cleanup_iterator();
     
     iter_tree = t;
@@ -1250,8 +1282,10 @@ int Art_index::init_iterator(const art_tree *t) {
         // Sort leaves by key
         qsort(iterator.leaves, iterator.total_leaves, sizeof(art_leaf*), compare_leaf_keys);
         iterator.valid = true;
+        iterator.cache_version = tree_version; // Update cache version
     } else {
         iterator.valid = false;
+        iterator.cache_version = 0;
     }
     
     return iterator.valid ? 0 : -1;
