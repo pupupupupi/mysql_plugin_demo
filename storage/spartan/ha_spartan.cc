@@ -72,6 +72,11 @@
   ha_example::rnd_next
   ha_example::rnd_next
   ha_example::rnd_next
+  ha_example::rnd_next
+  ha_example::rnd_next
+  ha_example::rnd_next
+  ha_example::rnd_next
+  ha_example::rnd_next
   ha_example::extra
   ha_example::external_lock
   ha_example::extra
@@ -325,7 +330,7 @@ int ha_spartan::close(void) {
 }
 
 uchar *ha_spartan::get_key() {
-  uchar *key = nullptr;
+  static uchar key_buffer[256]; // 使用静态缓冲区避免内存泄漏
   DBUG_ENTER("ha_spartan::get_key");  
   /*
   For each field in the table, check to see if it is the key
@@ -335,23 +340,130 @@ uchar *ha_spartan::get_key() {
   {
     if ((*field)->key_start.to_ulonglong() == 1)
     {
-      /*
-      Copy field value to key value (save key)
-      */
-      key = (uchar *)my_malloc(PSI_NOT_INSTRUMENTED,((*field)->field_length),MYF(MY_ZEROFILL | MY_WME));
-      memcpy(key, (*field)->field_ptr(), (*field)->key_length());
-      DBUG_RETURN(key);
+      memset(key_buffer, 0, sizeof(key_buffer));
+      
+      // Get field type and handle accordingly
+      const uchar *field_ptr = (*field)->field_ptr();
+      enum_field_types field_type = (*field)->type();
+      
+      switch (field_type) {
+        case MYSQL_TYPE_LONG:       // INT
+        case MYSQL_TYPE_LONGLONG:   // BIGINT
+        case MYSQL_TYPE_INT24:      // MEDIUMINT
+        case MYSQL_TYPE_SHORT:      // SMALLINT
+        case MYSQL_TYPE_TINY:       // TINYINT
+        {
+          // For integer fields, convert to memcomparable format
+          // MySQL requires big-endian with sign bit flipped for proper sorting
+          uint field_length = (*field)->pack_length();
+          
+          if (field_type == MYSQL_TYPE_LONG && field_length == 4) {
+            // Handle 4-byte signed INT
+            int32_t int_val = *((int32_t*)field_ptr);
+            
+            // Convert to memcomparable format:
+            // 1. Treat as unsigned to avoid sign extension
+            // 2. Flip sign bit (0x80000000) - this makes negatives sort before positives
+            // 3. Convert to big-endian
+            uint32_t unsigned_val = (uint32_t)int_val;
+            unsigned_val ^= 0x80000000; // Flip the sign bit
+            
+            // Store in big-endian order for memcmp compatibility
+            key_buffer[0] = (unsigned_val >> 24) & 0xFF;
+            key_buffer[1] = (unsigned_val >> 16) & 0xFF; 
+            key_buffer[2] = (unsigned_val >> 8) & 0xFF;
+            key_buffer[3] = unsigned_val & 0xFF;
+          } else {
+            // For other integer types, use direct copy for now
+            // TODO: Add proper handling for other integer sizes
+            memcpy(key_buffer, field_ptr, field_length);
+          }
+          break;
+        }
+        
+        case MYSQL_TYPE_VARCHAR:
+        case MYSQL_TYPE_VAR_STRING:
+        case MYSQL_TYPE_STRING:
+        {
+          // For VARCHAR fields, use the format that matches MySQL's key lookups
+          uint field_length = (*field)->pack_length();
+          
+          // Copy the length byte first
+          if (field_length > 0) {
+            key_buffer[0] = field_ptr[0]; // Length byte
+          }
+          
+          // Add a zero byte to match MySQL's key format during lookups
+          if (field_length > 1) {
+            key_buffer[1] = 0x00;
+            // Copy the actual string data starting from position 2
+            if (field_ptr[0] > 0 && field_ptr[0] < field_length) {
+              memcpy(key_buffer + 2, field_ptr + 1, field_ptr[0]);
+            }
+          }
+          break;
+        }
+        
+        default:
+        {
+          // For other field types, copy as-is
+          uint field_length = (*field)->pack_length();
+          memcpy(key_buffer, field_ptr, field_length);
+          break;
+        }
+      }
+      
+      DBUG_RETURN(key_buffer);
     }
   }
-  DBUG_RETURN(key);
+  DBUG_RETURN(nullptr);
 }
 
+/**
+  @brief
+  Convert MySQL key to memcomparable format for searching
+  This should match the format used in get_key() for storage
+*/
+uchar* ha_spartan::convert_search_key(const uchar *mysql_key, uint key_len, uint *converted_len) {
+  static uchar converted_buffer[256];
+  
+  // Get the primary key field info
+  for (Field **field = table->field; *field; field++) {
+    if ((*field)->key_start.to_ulonglong() == 1) {
+      enum_field_types field_type = (*field)->type();
+      
+      if (field_type == MYSQL_TYPE_LONG && key_len == 4) {
+        // Convert INT key to memcomparable format (same as get_key())
+        int32_t int_val = *((int32_t*)mysql_key);
+        uint32_t unsigned_val = (uint32_t)int_val;
+        unsigned_val ^= 0x80000000; // Flip the sign bit
+        
+        // Store in big-endian order
+        converted_buffer[0] = (unsigned_val >> 24) & 0xFF;
+        converted_buffer[1] = (unsigned_val >> 16) & 0xFF; 
+        converted_buffer[2] = (unsigned_val >> 8) & 0xFF;
+        converted_buffer[3] = unsigned_val & 0xFF;
+        
+        *converted_len = 4;
+        return converted_buffer;
+      }
+      // For other field types, return original key
+      memcpy(converted_buffer, mysql_key, key_len);
+      *converted_len = key_len;
+      return converted_buffer;
+    }
+  }
+  
+  // Fallback: return original key
+  memcpy(converted_buffer, mysql_key, key_len);
+  *converted_len = key_len;
+  return converted_buffer;
+}
 
 
 int ha_spartan::get_key_len()
 {
-  int length = 0;
-  DBUG_ENTER("ha_spartan::get_key");
+  DBUG_ENTER("ha_spartan::get_key_len");
   /*
   For each field in the table, check to see if it is the key
   by checking the key_start variable. (1 = is a key).
@@ -359,14 +471,39 @@ int ha_spartan::get_key_len()
   for (Field **field=table->field ; *field ; field++)
   {
     if ((*field)->key_start.to_ulonglong() == 1)
-    /*
-    Copy field length to key length
-    */
-    length = (*field)->key_length();
-
-    DBUG_RETURN(length);
+    {
+      uint pack_length = (*field)->pack_length();
+      enum_field_types field_type = (*field)->type();
+      
+      switch (field_type) {
+        case MYSQL_TYPE_LONG:       // INT
+        case MYSQL_TYPE_LONGLONG:   // BIGINT
+        case MYSQL_TYPE_INT24:      // MEDIUMINT
+        case MYSQL_TYPE_SHORT:      // SMALLINT
+        case MYSQL_TYPE_TINY:       // TINYINT
+        {
+          // For integer fields, key length equals pack length
+          DBUG_RETURN(pack_length);
+        }
+        
+        case MYSQL_TYPE_VARCHAR:
+        case MYSQL_TYPE_VAR_STRING:
+        case MYSQL_TYPE_STRING:
+        {
+          // For VARCHAR fields, add 1 for the extra 0x00 byte that MySQL adds during lookups
+          uint key_length = pack_length + 1;
+          DBUG_RETURN(key_length);
+        }
+        
+        default:
+        {
+          // For other field types, use pack length
+          DBUG_RETURN(pack_length);
+        }
+      }
+    }
   }
- DBUG_RETURN(length);
+  DBUG_RETURN(0);
 }
 
 /**
@@ -1015,27 +1152,35 @@ int ha_spartan::rename_table(const char * from, const char * to,  const dd::Tabl
 
 int ha_spartan::index_read(uchar *buf, const uchar *key, uint key_len, enum ha_rkey_function find_flag) {
   long long pos;
+  DBUG_ENTER("ha_spartan::index_read");
 
-  DBUG_ENTER("ha_archive::index_read");
-
-  if (key == NULL)
+  if (key == NULL) {
     pos = share->index_class->get_first_pos();
-  else
-    pos = share->index_class->get_index_pos((uchar *)key, key_len);
+  } else {
+    // Convert MySQL key format to our internal memcomparable format
+    uint converted_len;
+    uchar *converted_key = convert_search_key(key, key_len, &converted_len);
+    pos = share->index_class->get_index_pos(converted_key, converted_len);
+  }
+  
   if (pos == -1)
     DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
   current_position = pos + share->data_class->row_size(table->s->rec_buff_length);
   share->data_class->read_row(buf, table->s->rec_buff_length, pos);
   share->index_class->get_next_key();
   DBUG_RETURN(0);
-
 }
 
 int ha_spartan::index_read_idx(uchar *buf, uint index, const uchar *key,
                                uint key_len, enum ha_rkey_function) {
   long long pos;
   DBUG_ENTER("ha_spartan::index_read_idx");
-  pos = share->index_class->get_index_pos((uchar *)key, key_len);
+  
+  // Convert MySQL key format to our internal memcomparable format
+  uint converted_len;
+  uchar *converted_key = convert_search_key(key, key_len, &converted_len);
+  
+  pos = share->index_class->get_index_pos(converted_key, converted_len);
   if (pos == -1)
     DBUG_RETURN(HA_ERR_KEY_NOT_FOUND);
   share->data_class->read_row(buf, table->s->rec_buff_length, pos);
@@ -1112,7 +1257,7 @@ int ha_spartan::create(const char *name, TABLE *table_arg,
     //TODO index
     // fn_format(name_buff, name, "", SDI_EXT, MY_REPLACE_EXT | MY_UNPACK_FILENAME);
     fn_format(name_buff, name, "", SDI_EXT, MY_UNPACK_FILENAME | MY_APPEND_EXT);
-    if (share->index_class->create_index(name_buff,4))
+    if (share->index_class->create_index(name_buff,128))
     {
         DBUG_PRINT("info", ("hot here 1"));
         DBUG_RETURN(-1);

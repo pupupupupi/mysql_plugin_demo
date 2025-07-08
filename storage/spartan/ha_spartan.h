@@ -191,7 +191,7 @@ class ha_spartan : public handler {
     There is no need to implement ..._key_... methods if your engine doesn't
     support indexes.
    */
-  uint max_supported_key_length() const { return 4; }
+  uint max_supported_key_length() const { return 128; }
 
   /** @brief
     Called in test_quick_select to determine if indexes should be used.
@@ -312,6 +312,7 @@ class ha_spartan : public handler {
   uchar *get_key();
   uchar *create_key_buffer(unsigned int length);
   int get_key_len();
+  uchar* convert_search_key(const uchar *mysql_key, uint key_len, uint *converted_len);
 
   THR_LOCK_DATA **store_lock(
       THD *thd, THR_LOCK_DATA **to,
