@@ -66,6 +66,7 @@ private:
   File index_file;
   int max_key_len;
   SDE_NDX_NODE *root;
+  SDE_NDX_NODE *tail; // Pointer to the last node for fast appending
   SDE_NDX_NODE *range_ptr;
   int block_size;
   bool crashed;
@@ -74,4 +75,6 @@ private:
   long long write_row(SDE_INDEX *ndx);
   SDE_INDEX *read_row(long long Position);
   long long curfpos();
+  // Fast insert for bulk loading (appends to end without sorting)
+  void insert_key_fast(SDE_INDEX *ndx);
 };

@@ -22,6 +22,7 @@
 Spartan_index::Spartan_index(int keylen)
 {
   root = nullptr;
+  tail = nullptr;
   crashed = false;
   max_key_len = keylen;
   index_file = -1;
@@ -32,6 +33,7 @@ Spartan_index::Spartan_index(int keylen)
 Spartan_index::Spartan_index()
 {
   root = nullptr;
+  tail = nullptr;
   crashed = false;
   max_key_len = -1;
   index_file = -1;
@@ -466,6 +468,7 @@ int Spartan_index::close_index()
     root = root->next;
     delete p;     
   }
+  tail = nullptr;
   DBUG_RETURN(0);
 }
 
@@ -525,7 +528,8 @@ SDE_NDX_NODE *Spartan_index::seek_index_pos(uchar *key, int key_len)
 int Spartan_index::load_index()
 {
   SDE_INDEX *ndx;
-  int i = 1;
+  int bytes_read;
+  long long file_size, current_pos, data_start;
 
   DBUG_ENTER("Spartan_index::load_index");
   if (root != nullptr)
@@ -534,15 +538,53 @@ int Spartan_index::load_index()
     First, read the metadata at the front of the index.
   */
   read_header();
-  while(i != 0)
+  
+  // Get file size to determine how much data to read
+  file_size = my_seek(index_file, 0L, MY_SEEK_END, MYF(0));
+  data_start = METADATA_SIZE; // Start after metadata
+  current_pos = my_seek(index_file, data_start, MY_SEEK_SET, MYF(0));
+  
+  // Calculate record size for efficient reading
+  int record_size = max_key_len + sizeof(long long) + sizeof(int);
+  
+  // Check if there's any data to read
+  if (file_size <= data_start) {
+    DBUG_RETURN(0); // Empty index file
+  }
+  
+  while(current_pos < file_size)
   {
     ndx = new SDE_INDEX();
-    i = my_read(index_file, (uchar *)&ndx->key, max_key_len, MYF(0));
-    i = my_read(index_file, (uchar *)&ndx->pos, sizeof(long long), MYF(0));
-    i = my_read(index_file, (uchar *)&ndx->length, sizeof(int), MYF(0));
-    if (i != 0)
-      insert_key(ndx, false);
+    
+    // Read key
+    bytes_read = my_read(index_file, (uchar *)ndx->key, max_key_len, MYF(0));
+    if (bytes_read != max_key_len) {
+      delete ndx;
+      break; // EOF or error
+    }
+    
+    // Read position
+    bytes_read = my_read(index_file, (uchar *)&ndx->pos, sizeof(long long), MYF(0));
+    if (bytes_read != sizeof(long long)) {
+      delete ndx;
+      break; // EOF or error
+    }
+    
+    // Read length
+    bytes_read = my_read(index_file, (uchar *)&ndx->length, sizeof(int), MYF(0));
+    if (bytes_read != sizeof(int)) {
+      delete ndx;
+      break; // EOF or error
+    }
+    
+    // Insert the key into the index
+    insert_key_fast(ndx);
+    delete ndx; // Free the temporary structure since insert_key copies the data
+    
+    // Update current position
+    current_pos = my_seek(index_file, 0L, MY_SEEK_CUR, MYF(0));
   }
+  
   DBUG_RETURN(0);
 }
 
@@ -586,6 +628,7 @@ int Spartan_index::destroy_index()
     delete n;
   }
   root = nullptr;
+  tail = nullptr;
   DBUG_RETURN(0);
 }
 
@@ -610,4 +653,28 @@ int Spartan_index::trunc_index()
     write_header();
   }
   DBUG_RETURN(0);
+}
+
+/* Fast insert for bulk loading - appends to end without sorting */
+void Spartan_index::insert_key_fast(SDE_INDEX *ndx)
+{
+  SDE_NDX_NODE *new_node = new SDE_NDX_NODE();
+  
+  // Copy data to new node
+  memcpy(new_node->key_ndx.key, ndx->key, max_key_len);
+  new_node->key_ndx.pos = ndx->pos;
+  new_node->key_ndx.length = ndx->length;
+  new_node->next = nullptr;
+  
+  if (root == nullptr) {
+    // First node
+    root = new_node;
+    tail = new_node;
+    new_node->prev = nullptr;
+  } else {
+    // Append to tail
+    tail->next = new_node;
+    new_node->prev = tail;
+    tail = new_node;
+  }
 }
