@@ -63,6 +63,7 @@ class Art_share : public Handler_share {
   Art_data *data_class;
   Art_index *index_class;
   art_tree *index_tree1;
+  bool index_dirty;  // 标记索引是否需要保存到磁盘
   
   
   Art_share();
@@ -252,6 +253,10 @@ class ha_art : public handler {
   //int index_init(uint keynr, bool sorted) override;
   int index_read(uchar *buf, const uchar *key, uint key_len,
                  enum ha_rkey_function find_flag) override;
+
+  int index_read_map(uchar *buf, const uchar *key,
+                     key_part_map keypart_map,
+                     enum ha_rkey_function find_flag) override;
 
   // 函数读取一个索引文档，该文档包含整个表的所有键值以及其对应的行指针。
   virtual int index_read_idx(uchar *buf, uint index, const uchar *key,

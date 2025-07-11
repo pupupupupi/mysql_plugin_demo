@@ -77,6 +77,19 @@
   ha_example::rnd_next
   ha_example::rnd_next
   ha_example::rnd_next
+  ha_example::rnd_next
+  ha_example::rnd_next
+  ha_example::rnd_next
+  ha_example::rnd_next
+  ha_example::rnd_next
+  ha_example::rnd_next
+  ha_example::rnd_next
+  ha_example::rnd_next
+  ha_example::rnd_next
+  ha_example::rnd_next
+  ha_example::rnd_next
+  ha_example::rnd_next
+  ha_example::rnd_next
   ha_example::extra
   ha_example::external_lock
   ha_example::extra
@@ -155,6 +168,7 @@ Art_share::Art_share()
    index_tree1 = new art_tree();   
 
    index_class = new Art_index(index_tree1,255);
+   index_dirty = false;  // 初始化为不需要保存
    //TODO index class implementation
 }
 
@@ -309,6 +323,7 @@ int ha_art::open(const char *name, int mode, uint test_if_locked,
   
   // 从文件加载索引
   share->index_class->load_index(share->index_tree1);
+  share->index_dirty = false;  // 加载后索引与磁盘同步，无需保存
   
   // 用current_position初始化位置
   current_position = 0;
@@ -340,7 +355,6 @@ int ha_art::open(const char *name, int mode, uint test_if_locked,
 int ha_art::close(void) {
   DBUG_TRACE;
   DBUG_ENTER("ha_art::close");
-  
   // Clean up range scan state
   if (last_read_key) {
     my_free(last_read_key);
@@ -351,8 +365,11 @@ int ha_art::close(void) {
   
   share->data_class->close_table();
   
-  // 保存索引到文件
-  share->index_class->save_index(share->index_tree1);
+  // 只有在索引被修改时才保存到文件
+  if (share->index_dirty) {
+    share->index_class->save_index(share->index_tree1);
+    share->index_dirty = false;
+  }
   
   // 销毁内存中的索引
   share->index_class->destroy_index(share->index_tree1);
@@ -386,66 +403,72 @@ uchar *ha_art::get_key() {
         case MYSQL_TYPE_TINY:       // TINYINT
         {
           // For integer fields, convert to memcomparable format
-          // MySQL requires big-endian with sign bit flipped for proper sorting
-          uint field_length = (*field)->pack_length();
-          
-          if (field_type == MYSQL_TYPE_LONG && field_length == 4) {
-            // Handle 4-byte signed INT
-            int32_t int_val = *((int32_t*)field_ptr);
+          if (field_type == MYSQL_TYPE_LONG) {
+            // Read the 4-byte integer value
+            int32_t int_val = *((const int32_t*)field_ptr);
             
-            // Convert to memcomparable format:
-            // 1. Treat as unsigned to avoid sign extension
-            // 2. Flip sign bit (0x80000000) - this makes negatives sort before positives
-            // 3. Convert to big-endian
+            // Convert to unsigned and flip sign bit for memcomparable ordering
             uint32_t unsigned_val = (uint32_t)int_val;
             unsigned_val ^= 0x80000000; // Flip the sign bit
             
-            // Store in big-endian order for memcmp compatibility
+            // Store in big-endian order
             key_buffer[0] = (unsigned_val >> 24) & 0xFF;
             key_buffer[1] = (unsigned_val >> 16) & 0xFF; 
             key_buffer[2] = (unsigned_val >> 8) & 0xFF;
             key_buffer[3] = unsigned_val & 0xFF;
-          } else {
-            // For other integer types, use direct copy for now
-            // TODO: Add proper handling for other integer sizes
-            memcpy(key_buffer, field_ptr, field_length);
+            
+            DBUG_RETURN(key_buffer);
           }
           break;
         }
         
-        case MYSQL_TYPE_VARCHAR:
-        case MYSQL_TYPE_VAR_STRING:
-        case MYSQL_TYPE_STRING:
+        case MYSQL_TYPE_VARCHAR:    // VARCHAR
+        case MYSQL_TYPE_VAR_STRING: // VARBINARY
+        case MYSQL_TYPE_STRING:     // CHAR/BINARY
         {
-          // For VARCHAR fields, use the format that matches MySQL's key lookups
+          // For VARCHAR fields, we need to create a memcomparable key
+          // that matches what MySQL provides during searches
           uint field_length = (*field)->pack_length();
           
-          // Copy the length byte first
-          if (field_length > 0) {
-            key_buffer[0] = field_ptr[0]; // Length byte
+          // MySQL provides search keys in a specific format for VARCHAR fields
+          // We need to match that format for consistency
+          
+          // For VARCHAR fields, determine the length prefix size
+          // Most VARCHAR fields use 1 byte for length prefix, larger ones use 2 bytes
+          uint length_bytes = 1;
+          if (field_length > 255) {
+            length_bytes = 2;
           }
           
-          // Add a zero byte to match MySQL's key format during lookups
-          if (field_length > 1) {
-            key_buffer[1] = 0x00;
-            // Copy the actual string data starting from position 2
-            if (field_ptr[0] > 0 && field_ptr[0] < field_length) {
-              memcpy(key_buffer + 2, field_ptr + 1, field_ptr[0]);
-            }
+          // Read the actual string length from the length prefix
+          uint str_len = 0;
+          if (length_bytes == 1) {
+            str_len = *field_ptr;
+          } else if (length_bytes == 2) {
+            str_len = uint2korr(field_ptr);
           }
-          break;
+          
+          // Create the key in the format MySQL expects during searches:
+          // [length_byte][0x00][string_data][padding_zeros]
+          key_buffer[0] = (uchar)str_len;  // actual string length
+          key_buffer[1] = 0x00;            // separator byte that MySQL adds
+          
+          // Copy the actual string data
+          memcpy(key_buffer + 2, field_ptr + length_bytes, str_len);
+          
+          // Pad with zeros to match the total field length
+          uint total_key_len = field_length + 1; // +1 for the 0x00 separator
+          memset(key_buffer + 2 + str_len, 0, total_key_len - 2 - str_len);
+          
+          DBUG_RETURN(key_buffer);
         }
         
         default:
-        {
-          // For other field types, copy as-is
+          // For other types, fall back to simple copy
           uint field_length = (*field)->pack_length();
           memcpy(key_buffer, field_ptr, field_length);
-          break;
-        }
+          DBUG_RETURN(key_buffer);
       }
-      
-      DBUG_RETURN(key_buffer);
     }
   }
   DBUG_RETURN(nullptr);
@@ -466,7 +489,7 @@ uchar* ha_art::convert_search_key(const uchar *mysql_key, uint key_len, uint *co
       
       if (field_type == MYSQL_TYPE_LONG && key_len == 4) {
         // Convert INT key to memcomparable format (same as get_key())
-        int32_t int_val = *((int32_t*)mysql_key);
+        int32_t int_val = *((const int32_t*)mysql_key);
         uint32_t unsigned_val = (uint32_t)int_val;
         unsigned_val ^= 0x80000000; // Flip the sign bit
         
@@ -478,17 +501,27 @@ uchar* ha_art::convert_search_key(const uchar *mysql_key, uint key_len, uint *co
         
         *converted_len = 4;
         return converted_buffer;
+      } else if (field_type == MYSQL_TYPE_VARCHAR ||
+                 field_type == MYSQL_TYPE_VAR_STRING ||
+                 field_type == MYSQL_TYPE_STRING) {
+        // For VARCHAR fields, MySQL provides the key in the correct format
+        // Just use it directly
+        *converted_len = key_len;
+        memcpy(converted_buffer, mysql_key, key_len);
+        
+        return converted_buffer;
+      } else {
+        // For other field types, use the key as provided by MySQL
+        *converted_len = key_len;
+        memcpy(converted_buffer, mysql_key, key_len);
+        return converted_buffer;
       }
-      // For other field types, return original key
-      memcpy(converted_buffer, mysql_key, key_len);
-      *converted_len = key_len;
-      return converted_buffer;
     }
   }
   
-  // Fallback: return original key
-  memcpy(converted_buffer, mysql_key, key_len);
+  // Fallback: use the key as-is
   *converted_len = key_len;
+  memcpy(converted_buffer, mysql_key, key_len);
   return converted_buffer;
 }
 
@@ -542,7 +575,8 @@ int ha_art::get_key_len()
         case MYSQL_TYPE_VAR_STRING:
         case MYSQL_TYPE_STRING:
         {
-          // For VARCHAR fields, add 1 for the extra 0x00 byte that MySQL adds during lookups
+          // For VARCHAR fields, add 1 for the extra 0x00 separator byte
+          // Format: [length_byte][0x00][string_data][padding_zeros]
           uint key_length = pack_length + 1;
           DBUG_RETURN(key_length);
         }
@@ -632,6 +666,7 @@ int ha_art::write_row(uchar *buf) {
   
   if (key != nullptr && key_len > 0) {
     long long result = share->index_class->insert_key(share->index_tree1, key, pos, key_len);
+    share->index_dirty = true;  // 标记索引已被修改，需要保存
   }
   
   mysql_mutex_unlock(&share->mutex);
@@ -673,6 +708,7 @@ int ha_art::update_row(const uchar *old_data, uchar *new_data) {
   if (get_key() != 0)
   {
     share->index_class->update_key(share->index_tree1 ,get_key(), get_key_len(), pos_current);
+    share->index_dirty = true;  // 标记索引已被修改，需要保存
     // share->index_class->save_index();
     // share->index_class->load_index();
   }
@@ -721,8 +757,10 @@ int ha_art::delete_row(const uchar *buf) {
   mysql_mutex_lock(&share->mutex);
   share->data_class->delete_row((uchar *)buf, table->s->rec_buff_length, pos);
 
-  if (get_key() != 0)
+  if (get_key() != 0) {
     share->index_class->delete_key(share->index_tree1 ,get_key() ,get_key_len());
+    share->index_dirty = true;  // 标记索引已被修改，需要保存
+  }
   
   // if (get_key2() != 0)
   //   share->index_class->delete_key(share->index_tree1 ,get_key2() ,get_key_len2());
@@ -832,6 +870,34 @@ int ha_art::index_read(uchar *buf, const uchar *key, uint key_len, enum ha_rkey_
   share->data_class->read_row(buf, table->s->rec_buff_length, pos);
   
   DBUG_RETURN(0);
+}
+
+/**
+  @brief
+  Implementation of index_read_map for ART storage engine.
+  This function handles key lookups with key part maps.
+*/
+int ha_art::index_read_map(uchar *buf, const uchar *key,
+                           key_part_map keypart_map,
+                           enum ha_rkey_function find_flag) {
+  
+  // 计算实际的键长度
+  uint key_len = 0;
+  if (keypart_map) {
+    // 计算使用的键部分长度
+    for (uint i = 0; i < table->key_info[active_index].user_defined_key_parts; i++) {
+      if (keypart_map & (1ULL << i)) {
+        key_len += table->key_info[active_index].key_part[i].store_length;
+      } else {
+        break; // key parts must be contiguous
+      }
+    }
+  }
+  
+  // 调用现有的 index_read 函数
+  int result = index_read(buf, key, key_len, find_flag);
+  
+  return result;
 }
 
 /**
@@ -1195,6 +1261,22 @@ int ha_art::info(uint flag)
 int ha_art::extra(enum ha_extra_function operation)
 {
   DBUG_ENTER("ha_art::extra");
+  // 在某些关键操作时保存索引到磁盘
+  switch (operation) {
+    case HA_EXTRA_RESET_STATE:     // Reset database to after open
+    case HA_EXTRA_FLUSH:           // Flush cached info to disk
+      // 只有在索引被修改后才保存，避免不必要的磁盘I/O
+      if (share && share->index_class && share->index_tree1 && share->index_dirty) {
+        mysql_mutex_lock(&share->mutex);
+        share->index_class->save_index(share->index_tree1);
+        share->index_dirty = false;  // 保存完成后清除标志
+        mysql_mutex_unlock(&share->mutex);
+      }
+      break;
+    default:
+      break;
+  }
+  
   DBUG_RETURN(0);
 }
 
@@ -1261,6 +1343,16 @@ int ha_art::truncate()
 int ha_art::external_lock(THD *thd, int lock_type)
 {
   DBUG_ENTER("ha_art::external_lock");
+  // 当锁被释放时，检查是否需要保存索引
+  if (lock_type == F_UNLCK) {
+    if (share && share->index_class && share->index_tree1 && share->index_dirty) {
+      mysql_mutex_lock(&share->mutex);
+      share->index_class->save_index(share->index_tree1);
+      share->index_dirty = false;  // 保存完成后清除标志
+      mysql_mutex_unlock(&share->mutex);
+    }
+  }
+  
   DBUG_RETURN(0);
 }
 

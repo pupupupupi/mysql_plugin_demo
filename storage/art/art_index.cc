@@ -958,29 +958,39 @@ long long Art_index::get_index_pos(const art_tree *t, const uchar *key, int key_
           n = (art_node*)LEAF_RAW(n);
           art_leaf *leaf = (art_leaf*)n;
           
-          // Check if the expanded path matches
+          // Check if the entire key matches
           int match_result = leaf_matches(leaf, key, key_len, depth);
           
           if (match_result == 0) {
               return leaf->pos;
           }
-          return 0;
+          return -1;
       }
 
-      // Bail if the prefix does not match
+      // Check if the prefix matches
       if (n->partial_len) {
           prefix_len = check_prefix(n, key, key_len, depth);
-          if (prefix_len != min(MAX_PREFIX_LEN, n->partial_len))
-              return 0;
-          depth = depth + n->partial_len;
+          if (prefix_len != min(MAX_PREFIX_LEN, n->partial_len)) {
+              return -1;
+          }
+          depth += n->partial_len;
       }
 
       // Recursively search
+      if (depth >= key_len) {
+          return -1;
+      }
+      
       child = find_child(n, key[depth]);
-      n = (child) ? *child : NULL;
-      depth++;
+      if (child) {
+          n = *child;
+          depth++;
+      } else {
+          return -1;
+      }
   }
-  return 0;
+  
+  return -1;
 }
 
 long long Art_index::update_key(art_tree *t, uchar *key, int key_len, long long pos) {
