@@ -396,30 +396,76 @@ uchar *ha_art::get_key() {
       enum_field_types field_type = (*field)->type();
       
       switch (field_type) {
-        case MYSQL_TYPE_LONG:       // INT
-        case MYSQL_TYPE_LONGLONG:   // BIGINT
-        case MYSQL_TYPE_INT24:      // MEDIUMINT
-        case MYSQL_TYPE_SHORT:      // SMALLINT
-        case MYSQL_TYPE_TINY:       // TINYINT
+        case MYSQL_TYPE_TINY:       // TINYINT (1 byte)
         {
-          // For integer fields, convert to memcomparable format
-          if (field_type == MYSQL_TYPE_LONG) {
-            // Read the 4-byte integer value
-            int32_t int_val = *((const int32_t*)field_ptr);
-            
-            // Convert to unsigned and flip sign bit for memcomparable ordering
-            uint32_t unsigned_val = (uint32_t)int_val;
-            unsigned_val ^= 0x80000000; // Flip the sign bit
-            
-            // Store in big-endian order
-            key_buffer[0] = (unsigned_val >> 24) & 0xFF;
-            key_buffer[1] = (unsigned_val >> 16) & 0xFF; 
-            key_buffer[2] = (unsigned_val >> 8) & 0xFF;
-            key_buffer[3] = unsigned_val & 0xFF;
-            
-            DBUG_RETURN(key_buffer);
+          uint8_t int_val = *field_ptr;
+          // For signed TINYINT, flip sign bit for memcomparable ordering
+          if (!(*field)->is_unsigned()) {
+            int_val ^= 0x80;
           }
-          break;
+          key_buffer[0] = int_val;
+          DBUG_RETURN(key_buffer);
+        }
+        
+        case MYSQL_TYPE_SHORT:      // SMALLINT (2 bytes)
+        {
+          uint16_t int_val = uint2korr(field_ptr);
+          // For signed SMALLINT, flip sign bit for memcomparable ordering
+          if (!(*field)->is_unsigned()) {
+            int_val ^= 0x8000;
+          }
+          // Store in big-endian order
+          key_buffer[0] = (int_val >> 8) & 0xFF;
+          key_buffer[1] = int_val & 0xFF;
+          DBUG_RETURN(key_buffer);
+        }
+        
+        case MYSQL_TYPE_INT24:      // MEDIUMINT (3 bytes)
+        {
+          uint32_t int_val = uint3korr(field_ptr);
+          // For signed MEDIUMINT, flip sign bit for memcomparable ordering
+          if (!(*field)->is_unsigned()) {
+            int_val ^= 0x800000;
+          }
+          // Store in big-endian order
+          key_buffer[0] = (int_val >> 16) & 0xFF;
+          key_buffer[1] = (int_val >> 8) & 0xFF;
+          key_buffer[2] = int_val & 0xFF;
+          DBUG_RETURN(key_buffer);
+        }
+        
+        case MYSQL_TYPE_LONG:       // INT (4 bytes)
+        {
+          uint32_t int_val = uint4korr(field_ptr);
+          // For signed INT, flip sign bit for memcomparable ordering
+          if (!(*field)->is_unsigned()) {
+            int_val ^= 0x80000000;
+          }
+          // Store in big-endian order
+          key_buffer[0] = (int_val >> 24) & 0xFF;
+          key_buffer[1] = (int_val >> 16) & 0xFF;
+          key_buffer[2] = (int_val >> 8) & 0xFF;
+          key_buffer[3] = int_val & 0xFF;
+          DBUG_RETURN(key_buffer);
+        }
+        
+        case MYSQL_TYPE_LONGLONG:   // BIGINT (8 bytes)
+        {
+          uint64_t int_val = uint8korr(field_ptr);
+          // For signed BIGINT, flip sign bit for memcomparable ordering
+          if (!(*field)->is_unsigned()) {
+            int_val ^= 0x8000000000000000ULL;
+          }
+          // Store in big-endian order
+          key_buffer[0] = (int_val >> 56) & 0xFF;
+          key_buffer[1] = (int_val >> 48) & 0xFF;
+          key_buffer[2] = (int_val >> 40) & 0xFF;
+          key_buffer[3] = (int_val >> 32) & 0xFF;
+          key_buffer[4] = (int_val >> 24) & 0xFF;
+          key_buffer[5] = (int_val >> 16) & 0xFF;
+          key_buffer[6] = (int_val >> 8) & 0xFF;
+          key_buffer[7] = int_val & 0xFF;
+          DBUG_RETURN(key_buffer);
         }
         
         case MYSQL_TYPE_VARCHAR:    // VARCHAR
@@ -486,43 +532,200 @@ uchar* ha_art::convert_search_key(const uchar *mysql_key, uint key_len, uint *co
   for (Field **field = table->field; *field; field++) {
     if ((*field)->key_start.to_ulonglong() == 1) {
       enum_field_types field_type = (*field)->type();
+      uint field_pack_length = (*field)->pack_length();
       
-      if (field_type == MYSQL_TYPE_LONG && key_len == 4) {
-        // Convert INT key to memcomparable format (same as get_key())
-        int32_t int_val = *((const int32_t*)mysql_key);
-        uint32_t unsigned_val = (uint32_t)int_val;
-        unsigned_val ^= 0x80000000; // Flip the sign bit
+      // Handle integer types dynamically
+      switch (field_type) {
+        case MYSQL_TYPE_TINY:       // TINYINT (1 byte)
+        {
+          if (key_len == 1 && field_pack_length == 1) {
+            uint8_t int_val = *mysql_key;
+            // For signed TINYINT, flip sign bit for memcomparable ordering
+            if (!(*field)->is_unsigned()) {
+              int_val ^= 0x80;
+            }
+            converted_buffer[0] = int_val;
+            *converted_len = 1;
+            return converted_buffer;
+          }
+          break;
+        }
         
-        // Store in big-endian order
-        converted_buffer[0] = (unsigned_val >> 24) & 0xFF;
-        converted_buffer[1] = (unsigned_val >> 16) & 0xFF; 
-        converted_buffer[2] = (unsigned_val >> 8) & 0xFF;
-        converted_buffer[3] = unsigned_val & 0xFF;
+        case MYSQL_TYPE_SHORT:      // SMALLINT (2 bytes)
+        {
+          if (key_len == 2 && field_pack_length == 2) {
+            uint16_t int_val = uint2korr(mysql_key);
+            // For signed SMALLINT, flip sign bit for memcomparable ordering
+            if (!(*field)->is_unsigned()) {
+              int_val ^= 0x8000;
+            }
+            // Store in big-endian order
+            converted_buffer[0] = (int_val >> 8) & 0xFF;
+            converted_buffer[1] = int_val & 0xFF;
+            *converted_len = 2;
+            return converted_buffer;
+          }
+          break;
+        }
         
-        *converted_len = 4;
-        return converted_buffer;
-      } else if (field_type == MYSQL_TYPE_VARCHAR ||
-                 field_type == MYSQL_TYPE_VAR_STRING ||
-                 field_type == MYSQL_TYPE_STRING) {
-        // For VARCHAR fields, MySQL provides the key in the correct format
-        // Just use it directly
-        *converted_len = key_len;
-        memcpy(converted_buffer, mysql_key, key_len);
+        case MYSQL_TYPE_INT24:      // MEDIUMINT (3 bytes)
+        {
+          if (key_len == 3 && field_pack_length == 3) {
+            uint32_t int_val = uint3korr(mysql_key);
+            // For signed MEDIUMINT, flip sign bit for memcomparable ordering  
+            if (!(*field)->is_unsigned()) {
+              int_val ^= 0x800000;
+            }
+            // Store in big-endian order
+            converted_buffer[0] = (int_val >> 16) & 0xFF;
+            converted_buffer[1] = (int_val >> 8) & 0xFF;
+            converted_buffer[2] = int_val & 0xFF;
+            *converted_len = 3;
+            return converted_buffer;
+          }
+          break;
+        }
         
-        return converted_buffer;
-      } else {
-        // For other field types, use the key as provided by MySQL
-        *converted_len = key_len;
-        memcpy(converted_buffer, mysql_key, key_len);
-        return converted_buffer;
+        case MYSQL_TYPE_LONG:       // INT (4 bytes)
+        {
+          if (key_len == 4 && field_pack_length == 4) {
+            uint32_t int_val = uint4korr(mysql_key);
+            // For signed INT, flip sign bit for memcomparable ordering
+            if (!(*field)->is_unsigned()) {
+              int_val ^= 0x80000000;
+            }
+            // Store in big-endian order
+            converted_buffer[0] = (int_val >> 24) & 0xFF;
+            converted_buffer[1] = (int_val >> 16) & 0xFF;
+            converted_buffer[2] = (int_val >> 8) & 0xFF;
+            converted_buffer[3] = int_val & 0xFF;
+            *converted_len = 4;
+            return converted_buffer;
+          }
+          break;
+        }
+        
+        case MYSQL_TYPE_LONGLONG:   // BIGINT (8 bytes)
+        {
+          if (key_len == 8 && field_pack_length == 8) {
+            uint64_t int_val = uint8korr(mysql_key);
+            // For signed BIGINT, flip sign bit for memcomparable ordering
+            if (!(*field)->is_unsigned()) {
+              int_val ^= 0x8000000000000000ULL;
+            }
+            // Store in big-endian order
+            converted_buffer[0] = (int_val >> 56) & 0xFF;
+            converted_buffer[1] = (int_val >> 48) & 0xFF;
+            converted_buffer[2] = (int_val >> 40) & 0xFF;
+            converted_buffer[3] = (int_val >> 32) & 0xFF;
+            converted_buffer[4] = (int_val >> 24) & 0xFF;
+            converted_buffer[5] = (int_val >> 16) & 0xFF;
+            converted_buffer[6] = (int_val >> 8) & 0xFF;
+            converted_buffer[7] = int_val & 0xFF;
+            *converted_len = 8;
+            return converted_buffer;
+          }
+          break;
+        }
+        
+        case MYSQL_TYPE_VARCHAR:    // VARCHAR
+        case MYSQL_TYPE_VAR_STRING: // VARBINARY  
+        case MYSQL_TYPE_STRING:     // CHAR/BINARY
+        {
+          // For string types, validate key length matches expected format
+          uint expected_len = field_pack_length + 1; // +1 for separator byte
+          if (key_len == expected_len) {
+            // MySQL provides the key in the correct format, use it directly
+            *converted_len = key_len;
+            memcpy(converted_buffer, mysql_key, key_len);
+            return converted_buffer;
+          }
+          break;
+        }
+        
+        default:
+        {
+          // For other field types, validate length and use as-is
+          if (key_len == field_pack_length) {
+            *converted_len = key_len;
+            memcpy(converted_buffer, mysql_key, key_len);
+            return converted_buffer;
+          }
+          break;
+        }
       }
     }
   }
   
-  // Fallback: use the key as-is
+  // Fallback: use the key as-is (with warning in debug builds)
+  #ifdef DBUG_ASSERT
+  DBUG_PRINT("warning", ("Using fallback key conversion for length %u", key_len));
+  #endif
+  
   *converted_len = key_len;
   memcpy(converted_buffer, mysql_key, key_len);
   return converted_buffer;
+}
+
+/**
+  @brief
+  Helper function to validate key format consistency between insertion and search
+  This is useful for debugging key format mismatches
+*/
+bool ha_art::validate_key_format(const uchar *key1, uint len1, const uchar *key2, uint len2) {
+  // Check if lengths match
+  if (len1 != len2) {
+    #ifdef DBUG_ASSERT
+    DBUG_PRINT("warning", ("Key length mismatch: %u vs %u", len1, len2));
+    #endif
+    return false;
+  }
+  
+  // Check if content matches
+  if (memcmp(key1, key2, len1) != 0) {
+    #ifdef DBUG_ASSERT
+    DBUG_PRINT("warning", ("Key content mismatch"));
+    // Print hex dump for debugging
+    for (uint i = 0; i < len1 && i < 32; i++) {
+      DBUG_PRINT("warning", ("Byte %u: 0x%02X vs 0x%02X", i, key1[i], key2[i]));
+    }
+    #endif
+    return false;
+  }
+  
+  return true;
+}
+
+/**
+  @brief
+  Configuration table for different MySQL data types
+  This makes it easier to add support for new types and maintain consistency
+*/
+const ha_art::key_type_info ha_art_key_types[] = {
+  {MYSQL_TYPE_TINY,     1, true,  0x80ULL,                   "TINYINT"},
+  {MYSQL_TYPE_SHORT,    2, true,  0x8000ULL,                 "SMALLINT"},
+  {MYSQL_TYPE_INT24,    3, true,  0x800000ULL,               "MEDIUMINT"},
+  {MYSQL_TYPE_LONG,     4, true,  0x80000000ULL,             "INT"},
+  {MYSQL_TYPE_LONGLONG, 8, true,  0x8000000000000000ULL,     "BIGINT"},
+  {MYSQL_TYPE_FLOAT,    4, true,  0,                         "FLOAT"},
+  {MYSQL_TYPE_DOUBLE,   8, true,  0,                         "DOUBLE"},
+  {MYSQL_TYPE_VARCHAR,  0, false, 0,                         "VARCHAR"},
+  {MYSQL_TYPE_STRING,   0, false, 0,                         "CHAR"},
+  {MYSQL_TYPE_DECIMAL,  0, false, 0,                         "DECIMAL"},
+  {MYSQL_TYPE_NEWDECIMAL, 0, false, 0,                       "NEWDECIMAL"}
+};
+
+const ha_art::key_type_info* ha_art::get_key_type_info(enum_field_types field_type) {
+  size_t table_size = sizeof(ha_art_key_types) / sizeof(ha_art_key_types[0]);
+  
+  for (size_t i = 0; i < table_size; i++) {
+    if (ha_art_key_types[i].mysql_type == field_type) {
+      return &ha_art_key_types[i];
+    }
+  }
+  
+  // Return NULL for unsupported types
+  return nullptr;
 }
 
 // uchar *ha_art::get_key2() {
@@ -561,15 +764,20 @@ int ha_art::get_key_len()
       enum_field_types field_type = (*field)->type();
       
       switch (field_type) {
-        case MYSQL_TYPE_LONG:       // INT
-        case MYSQL_TYPE_LONGLONG:   // BIGINT
-        case MYSQL_TYPE_INT24:      // MEDIUMINT
-        case MYSQL_TYPE_SHORT:      // SMALLINT
-        case MYSQL_TYPE_TINY:       // TINYINT
-        {
-          // For integer fields, key length equals pack length
-          DBUG_RETURN(pack_length);
-        }
+        case MYSQL_TYPE_TINY:       // TINYINT (1 byte)
+          DBUG_RETURN(1);
+          
+        case MYSQL_TYPE_SHORT:      // SMALLINT (2 bytes)
+          DBUG_RETURN(2);
+          
+        case MYSQL_TYPE_INT24:      // MEDIUMINT (3 bytes)
+          DBUG_RETURN(3);
+          
+        case MYSQL_TYPE_LONG:       // INT (4 bytes)
+          DBUG_RETURN(4);
+          
+        case MYSQL_TYPE_LONGLONG:   // BIGINT (8 bytes)
+          DBUG_RETURN(8);
         
         case MYSQL_TYPE_VARCHAR:
         case MYSQL_TYPE_VAR_STRING:
@@ -581,10 +789,30 @@ int ha_art::get_key_len()
           DBUG_RETURN(key_length);
         }
         
+        case MYSQL_TYPE_FLOAT:      // FLOAT (4 bytes)
+          DBUG_RETURN(4);
+          
+        case MYSQL_TYPE_DOUBLE:     // DOUBLE (8 bytes)
+          DBUG_RETURN(8);
+          
+        case MYSQL_TYPE_DECIMAL:    // DECIMAL
+        case MYSQL_TYPE_NEWDECIMAL: // NEW DECIMAL
+          // For decimal types, use the pack length as-is
+          DBUG_RETURN(pack_length);
+          
         default:
         {
-          // For other field types, use pack length
-          DBUG_RETURN(pack_length);
+          // For other field types, use pack length with validation
+          if (pack_length > 0 && pack_length <= 255) {
+            DBUG_RETURN(pack_length);
+          } else {
+            // Log warning for unexpected field types in debug builds
+            #ifdef DBUG_ASSERT
+            DBUG_PRINT("warning", ("Unexpected field type %d with pack_length %u", 
+                       field_type, pack_length));
+            #endif
+            DBUG_RETURN(pack_length);
+          }
         }
       }
     }

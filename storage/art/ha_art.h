@@ -322,6 +322,21 @@ class ha_art : public handler {
   int get_key_len();
   // int get_key_len2();
   uchar* convert_search_key(const uchar *mysql_key, uint key_len, uint *converted_len);
+  
+  // Helper function to validate key format consistency
+  bool validate_key_format(const uchar *key1, uint len1, const uchar *key2, uint len2);
+  
+  // Configuration structure for key handling
+  struct key_type_info {
+    enum_field_types mysql_type;
+    uint size_bytes;
+    bool needs_endian_conversion;
+    uint64_t sign_bit_mask;
+    const char* type_name;
+  };
+  
+  // Get key type information for a field
+  static const key_type_info* get_key_type_info(enum_field_types field_type);
 
   THR_LOCK_DATA **store_lock(
       THD *thd, THR_LOCK_DATA **to,
